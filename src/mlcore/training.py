@@ -34,7 +34,7 @@ def train_step(model: torch.nn.Module,
     # Now we want to find the AVERAGE loss and accuracy of all the batches
     total_loss /= len(data_loader)
     acc /= len(data_loader)
-    return {'loss': total_loss, 'acc': acc}
+    return {'loss': total_loss.item(), 'acc': acc}
 
 
 def test_step(model: torch.nn.Module,
@@ -60,7 +60,7 @@ def test_step(model: torch.nn.Module,
         # Now we want to find the AVERAGE loss and accuracy of all the batches
         total_loss /= len(data_loader)
         acc /= len(data_loader)
-    return {'loss': total_loss, 'acc': acc}
+    return {'loss': total_loss.item(), 'acc': acc}
 
 
 def make_predictions(model: torch.nn.Module, samples: list) -> list:
