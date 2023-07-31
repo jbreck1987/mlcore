@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import numpy
 import math
+import random
 from tqdm.auto import tqdm
 import datetime as dt
 import pathlib
@@ -48,6 +49,7 @@ def gen_iq(qp_timestream: QuasiparticleTimeStream):
 def create_windows(i: numpy.array,
                    q: numpy.array,
                    photon_arrivals: numpy.array,
+                   qp_densities: numpy.array,
                    with_pulses: list,
                    no_pulses: list,
                    single_pulse: bool,
@@ -83,16 +85,19 @@ def create_windows(i: numpy.array,
             # If so add the window to the with_pulses container
             with_pulses.append(np.vstack((i[window : window + window_size],
                                           q[window : window + window_size],
-                                          photon_arrivals[window : window + window_size])).reshape(3, window_size)) # Reshaping to get in nice form for CNN
+                                          photon_arrivals[window : window + window_size],
+                                          qp_densities[window : window + window_size])).reshape(4, window_size)) # Reshaping to get in nice form for CNN
 
         # If no pulses are in the window and the no-pulse fraction hasn't been met,
         # add to the no_pulses container
         elif len(no_pulses) < num_samples * no_pulse_fraction and window_pulses == 0:
             no_pulses.append(np.vstack((i[window : window + window_size],
                                         q[window : window + window_size],
-                                        photon_arrivals[window : window + window_size])).reshape(3, window_size)) # Reshaping to get in nice form for CNN
+                                        photon_arrivals[window : window + window_size],
+                                        qp_densities[window : window + window_size])).reshape(4, window_size)) # Reshaping to get in nice form for CNN
 
 def make_dataset(qp_timestream: QuasiparticleTimeStream,
+                 magnitudes: List[int],
                  num_samples: int,
                  no_pulse_fraction: float,
                  with_pulses: list,
@@ -102,18 +107,22 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
                  edge_padding=0,
                  window_size=150
             ) -> None:
-    # Generate the training set in the following format: [np.array([i,q,label]), ...] where i,q,label are all WINDOW_SIZE length arrays.
-    # Each list element is a 3 x 1 x WINDOW_SIZE numpy array.
+    # Generate the training set in the following format: [np.array([i,q, photon_arrivals, qp_densities]), ...] where i,q,... are all WINDOW_SIZE length arrays.
+    # Each list element is a 4 x 1 x WINDOW_SIZE numpy array.
     count = len(with_pulses)
     while len(with_pulses) < num_samples - (num_samples * no_pulse_fraction):
         # We want the training data to be varied, so lets use the Poisson sampled
-        # gen_photon_arrivals method to change the photon flux per iteration
+        # gen_photon_arrivals method to change the photon flux per iteration and also modulate the
+        # quasiparticle density to get different pulse heights
+        # Note that the magniutdes are referenced to the lowest in the list (I.E. shortest wavelength has largest energy -> highest change in qp density)
+        qp_timestream.gen_quasiparticle_pulse(magnitude=min(magnitudes)/random.choice(magnitudes))
         photon_arrivals = qp_timestream.gen_photon_arrivals(cps=cps, seed=None)
-        qp_timestream.populate_photons() # this is necessary for the resonator object in the gen_iq function
+        qp_densities = qp_timestream.populate_photons() 
         I, Q = gen_iq(qp_timestream)
         create_windows(I,
                        Q,
                        photon_arrivals,
+                       qp_densities,
                        with_pulses,
                        no_pulses,
                        single_pulse,

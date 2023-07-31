@@ -13,15 +13,15 @@ from typing import List
 
 def plot_stream_data(i_stream: np.array,
                      q_stream: np.array,
-                     label_stream: np.array,
+                     photon_arr_stream: np.array,
+                     qp_density_stream: np.array,
                      units: str
                      ) -> None:
     """
-    Plots the training data. Assumes training samples are I and Q timestreams
-    and the labels are timestreams of photon events (based on the I/Q values).
+    Plots the training data. Assumes training samples are I/Q/photon arrival/qp density timestreams
     """
 
-    _, ax = plt.subplots(3,1,figsize = (10,10))
+    _, ax = plt.subplots(4,1,figsize = (10,20))
     ax[0].plot(np.arange(0, i_stream.size), i_stream)
     ax[0].set_xlabel(f'Time ({units})')
     ax[0].set_ylabel('I Timestream', fontweight = 'bold', size = 'large')
@@ -30,9 +30,13 @@ def plot_stream_data(i_stream: np.array,
     ax[1].set_xlabel(f'Time ({units})')
     ax[1].set_ylabel('Q Timestream', fontweight = 'bold', size = 'large')
 
-    ax[2].plot(np.arange(0, label_stream.size), label_stream)
+    ax[2].plot(np.arange(0, photon_arr_stream.size), photon_arr_stream)
     ax[2].set_xlabel(f'Time ({units})')
     ax[2].set_ylabel('Photon Timestream', fontweight = 'bold', size = 'large')
+    
+    ax[3].plot(np.arange(0, qp_density_stream.size), qp_density_stream)
+    ax[3].set_xlabel(f'Time ({units})')
+    ax[3].set_ylabel('QP Density Timestream', fontweight = 'bold', size = 'large')
     plt.show()
 
 
