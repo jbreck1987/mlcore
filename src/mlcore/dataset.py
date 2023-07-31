@@ -3,9 +3,12 @@ This module contains functions/classes that can be used to manipulate the traini
 for different model architectures and experiments.
 """
 import numpy as np
+import torch
 import numpy
 import math
 from tqdm.auto import tqdm
+import datetime as dt
+import pathlib
 from typing import List
 
 from mkidreadoutanalysis.quasiparticletimestream import QuasiparticleTimeStream
@@ -124,5 +127,13 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
             count = len(with_pulses)
     print(f'\nNumber of samples with pulses: {len(with_pulses)}')
     print(f'Number of samples without pulses: {len(no_pulses)}')
+
+
+def save_model(model_dir: pathlib.Path, filename: str,  model: torch.nn.Module, ext: str) -> None:
+
+    # Append unix epoch to the filename and add the given extension
+    filename = f'{filename}_{str(int(dt.datetime.now().timestamp()))}.{ext}'
+    print(f'Saving model state_dict to {str(model_dir)} as {filename}')
+    torch.save(obj=model.state_dict(), f=model_dir / filename)
 
 
