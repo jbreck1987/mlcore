@@ -52,6 +52,12 @@ def accuracy_regression(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
     # Difference between outputs > 1 implies 0% accuracy
     return 0.0 if mag > 1 else 1 - mag
 
+def regression_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
+    """
+    This function first finds the mean prediction and target vectors in the
+    batch and then returns the absolute difference between them (lower is better)
+    """
+    return torch.abs(y_pred.mean(dim=0) - y_true.mean(dim=0)).sum().item()
 
 def add_noise(pulse_list: List[np.array], range: float) -> None:
     """
