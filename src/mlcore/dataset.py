@@ -7,13 +7,26 @@ import torch
 import numpy
 import math
 import random
-from tqdm.auto import tqdm
 import datetime as dt
 import pathlib
 from typing import List
 
 from mkidreadoutanalysis.quasiparticletimestream import QuasiparticleTimeStream
-from mkidreadoutanalysis.resonator import Resonator, FrequencyGrid, RFElectronics, ReadoutPhotonResonator
+from mkidreadoutanalysis.resonator import Resonator, FrequencyGrid, RFElectronics, ReadoutPhotonResonator, LineNoise
+
+# Define constant resonator, readout electronics, noise, and frequency sweep objects
+_RES = Resonator(f0=4.0012e9, qi=200000, qc=15000, xa=1e-9, a=0, tls_scale=1e2)
+_FREQ_GRID = FrequencyGrid(fc=_RES.f0, points=1000, span=500e6)
+_LINE_NOISE = LineNoise(freqs=[60, 50e3, 100e3, 250e3, -300e3, 300e3, 500e3],
+                        amplitudes=[0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.01],
+                        phases=[0, 0.5, 0,1.3,0.5, 0.2, 2.4],
+                        n_samples=100,
+                        fs=1e3)
+_RF = RFElectronics(gain=(3.0, 0, 0),
+                    phase_delay=0,
+                    white_noise_scale=10,
+                    line_noise=_LINE_NOISE,
+                    cable_delay=50e-9)
 
 def gen_iq(qp_timestream: QuasiparticleTimeStream):
     '''
@@ -25,24 +38,12 @@ def gen_iq(qp_timestream: QuasiparticleTimeStream):
     Returns: tuple of two numpy arrays containing the I and Q timestreams respectively.
     '''
 
-    #Creating a resonator object
-    resonator = Resonator(f0=4.0012e9, qi=200000, qc=15000, xa=1e-9, a=0, tls_scale=1e2)
-    rf = RFElectronics(gain=(3.0, 0, 0), phase_delay=0, cable_delay=50e-9)
-    freq = FrequencyGrid( fc=4.0012e9, points=1000, span=500e6)
-
     #Creating Photon Resonator Readout
-    lit_res_measurment = ReadoutPhotonResonator(resonator, qp_timestream, freq, rf)
-    lit_res_measurment.noise_on = True #toggle white noise and line noise
-    lit_res_measurment.rf.noise_scale = 10 #adjust white noise scale
-
-    #configure line noise for Resonator
-    lit_res_measurment.rf.line_noise.freqs = ([60, 50e3, 100e3, 250e3, -300e3, 300e3, 500e3]) # Hz and relative to center of bin (MKID we are reading out)
-    lit_res_measurment.rf.line_noise.amplitudes = ([0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.01])
-    lit_res_measurment.rf.line_noise.phases = ([0, 0.5, 0,1.3,0.5, 0.2, 2.4])
+    readout = ReadoutPhotonResonator(_RES, qp_timestream, _FREQ_GRID, _RF)
 
     #Generating Synthetic Data for Output
-    I = lit_res_measurment.normalized_iq.real
-    Q = lit_res_measurment.normalized_iq.imag
+    I = readout.normalized_iq.real
+    Q = readout.normalized_iq.imag
 
     return I, Q 
 
