@@ -11,36 +11,43 @@ import matplotlib.pyplot as plt
 
 from typing import List
 
-def plot_stream_data(i_stream: np.array,
-                     q_stream: np.array,
-                     photon_arr_stream: np.array,
-                     qp_density_stream: np.array,
-                     units: str
-                     ) -> None:
+def plot_stream_data(units: str, **kwargs) -> None:
     """
-    Plots the training data. Assumes training samples are I/Q/photon arrival/qp density timestreams
+    Plots the training data. Assumes training samples are
+    I/Q/photon arrival/qp density/phase response timestreams.
+    The functions allows for submitting any combination of these
+    timestreams and will plot accordingly.
     """
 
-    _, ax = plt.subplots(4,1,figsize = (10,20))
-    ax[0].plot(np.arange(0, i_stream.size), i_stream)
-    ax[0].set_xlabel(f'Time ({units})')
-    ax[0].set_ylabel('I Timestream', fontweight = 'bold', size = 'large')
-
-    ax[1].plot(np.arange(0, q_stream.size), q_stream)
-    ax[1].set_xlabel(f'Time ({units})')
-    ax[1].set_ylabel('Q Timestream', fontweight = 'bold', size = 'large')
-
-    ax[2].plot(np.arange(0, photon_arr_stream.size), photon_arr_stream)
-    ax[2].set_xlabel(f'Time ({units})')
-    ax[2].set_ylabel('Photon Timestream', fontweight = 'bold', size = 'large')
+    # Define the allowed keys that can be passed into the function
+    # Also making this a dictionary of the labels to be used in the plots
+    # for a given passed in key.
+    allowed_kw = {'i': 'I',
+                  'q': 'Q',
+                  'phase_response': 'Phase Response',
+                  'photon_arrivals': 'Photon Arrivals',
+                  'pred': 'Model Prediction',
+                  'qp_density': r'$\Delta$ Quasiparticle Density'}
     
-    ax[3].plot(np.arange(0, qp_density_stream.size), qp_density_stream)
-    ax[3].set_xlabel(f'Time ({units})')
-    ax[3].set_ylabel('QP Density Timestream', fontweight = 'bold', size = 'large')
+    # Want to get a list of all the keys that are passed as kwargs but arent in the
+    # allowed kwarg dict above
+    unknown_kw = [passed_key for passed_key in kwargs.keys() if passed_key not in allowed_kw.keys()]
+    if len(unknown_kw) > 0:
+        raise KeyError(f"Unknown keys {str(unknown_kw).strip('[]')}")
+    
+    # Loop over the passed in keys and add subplot for the associated
+    # quantity
+    _, ax = plt.subplots(len(kwargs.keys()),figsize=(10, 5 * len(kwargs.keys())))
+    for idx, key in enumerate(kwargs.keys()):
+        if len(kwargs.keys()) == 1:
+            ax.plot(np.arange(0, kwargs[key].size), kwargs[key])
+            ax.set_xlabel(f'Time ({units})')
+            ax.set_ylabel(allowed_kw[key], fontweight = 'bold', size = 'small')
+        else:
+            ax[idx].plot(np.arange(0, kwargs[key].size), kwargs[key])
+            ax[idx].set_xlabel(f'Time ({units})')
+            ax[idx].set_ylabel(allowed_kw[key], fontweight = 'bold', size = 'medium')
     plt.show()
-
-
-
 
 def accuracy_regression(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
     """
