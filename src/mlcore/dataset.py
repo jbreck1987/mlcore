@@ -28,29 +28,30 @@ _RF = RFElectronics(gain=(3.0, 0, 0),
                     line_noise=_LINE_NOISE,
                     cable_delay=50e-9)
 
-def gen_iq(qp_timestream: QuasiparticleTimeStream):
-    '''
-    Generate I and Q time streams using the mkidreadoutanalysis library
+def gen_iqp(qp_timestream: QuasiparticleTimeStream, norm: bool = True):
+    """
+    Generate I, Q, and Phase Response time streams using the mkidreadoutanalysis library
 
     Inputs: 
-        QuasiPartcileTimeStream object with populated photons
+        qp_timestream: This object should have the photons generated before passing
+        norm: Determines whether to return normalized or non-normalized I/Q response
     
-    Returns: tuple of two numpy arrays containing the I and Q timestreams respectively.
-    '''
+    Returns: tuple of three numpy arrays containing the I, Q, and Phase Response timestreams respectively.
+    """
 
-    #Creating Photon Resonator Readout
-    readout = ReadoutPhotonResonator(_RES, qp_timestream, _FREQ_GRID, _RF)
+    # Create Photon Resonator Readout
+    readout = ReadoutPhotonResonator(_RES, qp_timestream, _FREQ_GRID, _RF, noise_on=True)
 
-    #Generating Synthetic Data for Output
-    I = readout.normalized_iq.real
-    Q = readout.normalized_iq.imag
-
-    return I, Q 
+    # Return I, Q, and Phase Response timestreams
+    if bool:
+        return readout.normalized_iq.real, readout.normalized_iq.imag, readout.basic_coordinate_transformation()[0]
+    return readout.iq_response.real, readout.iq_response.imag, readout.basic_coordinate_transformation()[0]
 
 def create_windows(i: numpy.array,
                    q: numpy.array,
                    photon_arrivals: numpy.array,
                    qp_densities: numpy.array,
+                   phase_responses: numpy.array,
                    with_pulses: list,
                    no_pulses: list,
                    single_pulse: bool,
@@ -87,7 +88,8 @@ def create_windows(i: numpy.array,
             with_pulses.append(np.vstack((i[window : window + window_size],
                                           q[window : window + window_size],
                                           photon_arrivals[window : window + window_size],
-                                          qp_densities[window : window + window_size])).reshape(4, window_size)) # Reshaping to get in nice form for CNN
+                                          qp_densities[window : window + window_size],
+                                          phase_responses[window : window + window_size])).reshape(5, window_size)) # Reshaping to get in nice form for CNN
 
         # If no pulses are in the window and the no-pulse fraction hasn't been met,
         # add to the no_pulses container
@@ -95,7 +97,9 @@ def create_windows(i: numpy.array,
             no_pulses.append(np.vstack((i[window : window + window_size],
                                         q[window : window + window_size],
                                         photon_arrivals[window : window + window_size],
-                                        qp_densities[window : window + window_size])).reshape(4, window_size)) # Reshaping to get in nice form for CNN
+                                        qp_densities[window : window + window_size],
+                                        phase_responses[window : window + window_size])).reshape(5, window_size)) # Reshaping to get in nice form for CNN
+
 
 def make_dataset(qp_timestream: QuasiparticleTimeStream,
                  magnitudes: List[int],
@@ -106,10 +110,11 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
                  single_pulse: bool,
                  cps=500,
                  edge_padding=0,
-                 window_size=150
+                 window_size=150,
+                 normalize: bool = True
             ) -> None:
     # Generate the training set in the following format: [np.array([i,q, photon_arrivals, qp_densities]), ...] where i,q,... are all WINDOW_SIZE length arrays.
-    # Each list element is a 4 x 1 x WINDOW_SIZE numpy array.
+    # Each list element is a 5 x 1 x WINDOW_SIZE numpy array.
     count = len(with_pulses)
     while len(with_pulses) < num_samples - (num_samples * no_pulse_fraction):
         # We want the training data to be varied, so lets use the Poisson sampled
@@ -119,11 +124,13 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
         qp_timestream.gen_quasiparticle_pulse(magnitude=min(magnitudes)/random.choice(magnitudes))
         photon_arrivals = qp_timestream.gen_photon_arrivals(cps=cps, seed=None)
         qp_densities = qp_timestream.populate_photons() 
-        I, Q = gen_iq(qp_timestream)
+        I, Q, phase_resp = gen_iqp(qp_timestream, normalize)
+        # print(f'I: {I.size}, Q: {Q.size}, P: {phase_resp.size}')
         create_windows(I,
                        Q,
                        photon_arrivals,
                        qp_densities,
+                       phase_resp,
                        with_pulses,
                        no_pulses,
                        single_pulse,
