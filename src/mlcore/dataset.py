@@ -229,4 +229,46 @@ def save_model(model_dir: pathlib.Path, filename: str,  model: torch.nn.Module, 
 
 ### DATA TRANSFORMATION FUNCTIONS ###
 #-----------------------------------#
+def stream_to_height(photon_arrivals: np.ndarray,
+                     pulse_stream: np.ndarray) -> np.ndarray:
+    """
+    Takes a training/test sample that is a timestream (such as quasiparticle density
+    or phase response) and returns the height of the pulse(s) in the training sample.
+    If input vectors are 2D, the function assumes the first axis denotes the training
+    sample while the second axis is length of the streams. ONLY WORKS FOR SAMPLES WITH
+    SINGLE PULSES.
 
+    Inputs:
+        -photon_arrivals: Used to determine the locations of the pulse(s)
+        -pulse_stream: The timestream containing the pulse(s)
+    
+    returns:
+        -singleton numpy array with the pulse height value. if the input arrays are
+        2d, the returned numpy array has shape (num_training_samples, 1), where the second
+        axis contains the pulse height for the associated training sample
+    """
+    if photon_arrivals.shape[0] == 1:
+        return pulse_stream[photon_arrivals == 1]
+    return pulse_stream[photon_arrivals == 1].reshape(photon_arrivals.shape[0], 1)
+
+
+def stream_to_arrival(photon_arrivals: np.ndarray, norm: bool = True) -> np.ndarray:
+    """
+    Takes the photon_arrivals timestream from a training/test sample and returns the 
+    location of the pulse. If input vector is 2D, the function assumes the first axis denotes the training
+    sample number while the second axis is length of the streams. ONLY WORKS FOR SAMPLES WITH
+    SINGLE PULSES.
+
+    Inputs:
+        -photon_arrivals: Used to determine the locations of the pulse(s)
+        -norm: If true, normalize the pulse location value.
+    Returns:
+        -singleton numpy array with the pulse height value. if the input arrays are
+        2d, the returned numpy array has shape (num_training_samples, 1), where the second
+        axis contains the pulse height for the associated training sample
+    """
+    if photon_arrivals.shape[0] == 1 or len(photon_arrivals.shape) == 1:
+        return np.argwhere(photon_arrivals == 1) / photon_arrivals.size if norm else np.argwhere(photon_arrivals == 1)
+    ret = np.argwhere(photon_arrivals == 1)[:, 1] / photon_arrivals.shape[1] if norm else np.argwhere(photon_arrivals == 1)[:, 1]
+    return ret.reshape(photon_arrivals.shape[0], 1)
+    
