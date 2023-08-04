@@ -119,7 +119,7 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
             ) -> None:
     # Generate the training set in the following format: [np.array([i,q, photon_arrivals, qp_densities, phase_resp]), ...]
     # where i,q,... are all WINDOW_SIZE length arrays.
-    # Each list element is a 5 x 1 x WINDOW_SIZE numpy array.
+    # Each list element is a 5 x WINDOW_SIZE numpy array.
     count = len(with_pulses)
     while len(with_pulses) < num_samples - (num_samples * no_pulse_fraction):
         # We want the training data to be varied, so lets use the Poisson sampled
@@ -150,12 +150,16 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
     print(f'Number of samples without pulses: {len(no_pulses)}')
 
 
-def save_training_data(in_array: Any, dir: pathlib.Path, labels: Tuple[str], filename: str) -> None:
+def save_training_data(in_array: Any,
+                       dir: pathlib.Path,
+                       filename: str,
+                       labels: Tuple[str] = ('i', 'q', 'photon_arrivals', 'qp_density', 'phase_response'),
+                       ) -> None:
     """
     Saves the training/test data to disk as an npz file after generation.
     This function expects the data to be structured such that the different timestreams
     are stacked along the second axis while the first axis denotes the training sample
-    number.
+    number (this format matches the make_dataset function.)
 
     Example: in_array is numpy array with shape (100, 5, 200) => there are 100
     training samples, 5 timestreams per example, and the training sample length for each
@@ -165,7 +169,7 @@ def save_training_data(in_array: Any, dir: pathlib.Path, labels: Tuple[str], fil
     be accessed individually to ease data manipulation after loading.
 
     Inputs:
-        -in_array: array_like: See example above
+        -in_array: array_like (anything acceptable by numpy API): See example above
         -dir: Directory to store the file in
         -filename: The name to be given to the file (extension will be appended)
         -labels: These are the labels that will be assigned to the different streams when they are
@@ -187,6 +191,30 @@ def save_training_data(in_array: Any, dir: pathlib.Path, labels: Tuple[str], fil
         
     # If all works out, save the data with the given labels
     np.savez(dir / filename, **kws)
+
+
+def load_training_data(filepath: pathlib.Path,
+                       labels: Tuple[str] = ('i', 'q', 'photon_arrivals', 'qp_density', 'phase_response')) -> Tuple[np.ndarray]:
+    """
+    Loads training/test data from disk based on the format used in
+    the save_training_data() function. The reconstructed array will
+    be in the shape (num_training_samples, num_timestreams, timestream length).
+    The file format is assumed to npz.
+
+    Inputs:
+        -filepath: path to the npz file on disk
+        -labels: These are the labels that will be assigned to the different streams when they are
+         saved as arrays in the npz file.
+    
+    Returns:
+        -Tuple of the arrays that corresspond to each passed label, matched index-wise.
+    """
+    
+    # Load with given labels. Not doing any special handling of exceptions, will let the numpy API raise.
+    with np.load(filepath) as f:
+        return tuple([f[label] for label in labels])
+
+    
 
 
 ### MODEL LOADING AND SAVING FUNCTIONS ###
