@@ -7,12 +7,16 @@ import torch
 import numpy
 import math
 import random
+from warnings import warn
 import datetime as dt
 import pathlib
-from typing import List
+from typing import List, Any, Tuple
 
 from mkidreadoutanalysis.quasiparticletimestream import QuasiparticleTimeStream
 from mkidreadoutanalysis.resonator import Resonator, FrequencyGrid, RFElectronics, ReadoutPhotonResonator, LineNoise
+
+### DATASET GENERATION FUNCTIONS ###
+#----------------------------------#
 
 # Define constant resonator, readout electronics, noise, and frequency sweep objects
 _RES = Resonator(f0=4.0012e9, qi=200000, qc=15000, xa=1e-9, a=0, tls_scale=1e2)
@@ -43,7 +47,7 @@ def gen_iqp(qp_timestream: QuasiparticleTimeStream, norm: bool = True):
     readout = ReadoutPhotonResonator(_RES, qp_timestream, _FREQ_GRID, _RF, noise_on=True)
 
     # Return I, Q, and Phase Response timestreams
-    if bool:
+    if norm:
         return readout.normalized_iq.real, readout.normalized_iq.imag, readout.basic_coordinate_transformation()[0]
     return readout.iq_response.real, readout.iq_response.imag, readout.basic_coordinate_transformation()[0]
 
@@ -59,9 +63,9 @@ def create_windows(i: numpy.array,
                    no_pulse_fraction: float,
                    edge_padding: int,
                    window_size: int,
-                   ) -> None:
+                ) -> None:
     """
-    This function takes the output of the mkidreadoutanalysis objects (I, Q, and Photon Arrival vectors) and chunks it into smaller arrays. The code
+    This function takes the output of the mkidreadoutanalysis objects (I stream, Q stream, etc... ) and chunks it into smaller arrays. The code
     also separates chunks with photons and those without photons with the goal of limiting the number of samples
     without photon pulses since there are vastly more windows in the synthetic data in this category. It uses "scanning" logic to scan over the full
     arrays with a given window size and inspects that window for a photon event. The window is then added to the appropriate container (photon/no photon).
@@ -76,14 +80,14 @@ def create_windows(i: numpy.array,
         window_pulse_idxs = np.argwhere(photon_arrivals[window : window + window_size])
         valid_window_start = window + edge_padding
         valid_window_end = window + window_size - edge_padding
-        valid_pulse = ((window_pulse_idxs > valid_window_start) & (window_pulse_idxs < valid_window_end)).all()
+        valid_pulses = ((window_pulse_idxs > valid_window_start) & (window_pulse_idxs < valid_window_end)).all() # No pulses in edge pad ranges
 
         # If there are more than one pulses in the entire window and we only want single pulse data, skip this window
         if window_pulses > 1 and single_pulse:
             continue
 
-        # Now any window with a pulse is valid as long as the pulse(s) dont live in the edge padding area
-        elif window_pulses > 0 and valid_pulse:
+        # Now any window with a pulse is valid as long as the pulse(s) dont live in the edge padding areas
+        elif window_pulses > 0 and valid_pulses:
             # If so add the window to the with_pulses container
             with_pulses.append(np.vstack((i[window : window + window_size],
                                           q[window : window + window_size],
@@ -113,19 +117,19 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
                  window_size=150,
                  normalize: bool = True
             ) -> None:
-    # Generate the training set in the following format: [np.array([i,q, photon_arrivals, qp_densities]), ...] where i,q,... are all WINDOW_SIZE length arrays.
+    # Generate the training set in the following format: [np.array([i,q, photon_arrivals, qp_densities, phase_resp]), ...]
+    # where i,q,... are all WINDOW_SIZE length arrays.
     # Each list element is a 5 x 1 x WINDOW_SIZE numpy array.
     count = len(with_pulses)
     while len(with_pulses) < num_samples - (num_samples * no_pulse_fraction):
         # We want the training data to be varied, so lets use the Poisson sampled
-        # gen_photon_arrivals method to change the photon flux per iteration and also modulate the
-        # quasiparticle density to get different pulse heights
-        # Note that the magniutdes are referenced to the lowest in the list (I.E. shortest wavelength has largest energy -> highest change in qp density)
+        # gen_photon_arrivals() method to change the photon flux per iteration and also modulate the
+        # quasiparticle density to get different pulse heights.
+        # Note that the magniutdes are normalized to the lowest in the list (I.E. shortest wavelength has largest energy -> highest change in qp density)
         qp_timestream.gen_quasiparticle_pulse(magnitude=min(magnitudes)/random.choice(magnitudes))
         photon_arrivals = qp_timestream.gen_photon_arrivals(cps=cps, seed=None)
         qp_densities = qp_timestream.populate_photons() 
         I, Q, phase_resp = gen_iqp(qp_timestream, normalize)
-        # print(f'I: {I.size}, Q: {Q.size}, P: {phase_resp.size}')
         create_windows(I,
                        Q,
                        photon_arrivals,
@@ -146,11 +150,55 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
     print(f'Number of samples without pulses: {len(no_pulses)}')
 
 
+def save_training_data(in_array: Any, dir: pathlib.Path, labels: Tuple[str], filename: str) -> None:
+    """
+    Saves the training/test data to disk as an npz file after generation.
+    This function expects the data to be structured such that the different timestreams
+    are stacked along the second axis while the first axis denotes the training sample
+    number.
+
+    Example: in_array is numpy array with shape (100, 5, 200) => there are 100
+    training samples, 5 timestreams per example, and the training sample length for each
+    stream is 200 elements long.
+
+    The streams will be stored in their own arrays within the npz file so that they can
+    be accessed individually to ease data manipulation after loading.
+
+    Inputs:
+        -in_array: array_like: See example above
+        -dir: Directory to store the file in
+        -filename: The name to be given to the file (extension will be appended)
+        -labels: These are the labels that will be assigned to the different streams when they are
+        saved as arrays in the npz file.
+    """
+
+    if not isinstance(in_array, np.ndarray):
+        warn(f'Input array is not a numpy array, making copy. This can have memory usage implications...', Warning)
+        temp_arr = np.array(in_array)
+    else:
+        temp_arr = in_array
+    try:
+        # Try to match the the streams in the given array with the given labels index-wise.
+        # If the number of labels doesn't match number of streams, zip() will raise.
+        kws = {label: temp_arr[:,stream,:].view() for label, stream in zip(labels, range(temp_arr.shape[1]), strict=True)}
+    except ValueError:
+        # Suppress the ValueError from zip() and raise a more informative IndexError
+        raise IndexError('Number of given labels does not match number of streams in input array.') from None
+        
+    # If all works out, save the data with the given labels
+    np.savez(dir / filename, **kws)
+
+
+### MODEL LOADING AND SAVING FUNCTIONS ###
+#----------------------------------------#
 def save_model(model_dir: pathlib.Path, filename: str,  model: torch.nn.Module, ext: str) -> None:
 
-    # Append unix epoch to the filename and add the given extension
+    # Append unix epoch to the given filename and add the given extension
     filename = f'{filename}_{str(int(dt.datetime.now().timestamp()))}.{ext}'
     print(f'Saving model state_dict to {str(model_dir)} as {filename}')
     torch.save(obj=model.state_dict(), f=model_dir / filename)
 
+
+### DATA TRANSFORMATION FUNCTIONS ###
+#-----------------------------------#
 
