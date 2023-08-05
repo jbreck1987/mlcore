@@ -230,7 +230,8 @@ def save_model(model_dir: pathlib.Path, filename: str,  model: torch.nn.Module, 
 ### DATA TRANSFORMATION FUNCTIONS ###
 #-----------------------------------#
 def stream_to_height(photon_arrivals: np.ndarray,
-                     pulse_stream: np.ndarray) -> np.ndarray:
+                     pulse_stream: np.ndarray,
+                     norm: bool = True) -> np.ndarray:
     """
     Takes a training/test sample that is a timestream (such as quasiparticle density
     or phase response) and returns the height of the pulse(s) in the training sample.
@@ -247,8 +248,22 @@ def stream_to_height(photon_arrivals: np.ndarray,
         2d, the returned numpy array has shape (num_training_samples, 1), where the second
         axis contains the pulse height for the associated training sample
     """
-    if photon_arrivals.shape[0] == 1:
+
+    # Define auxiliary function that contains the normalization logic to simplify code
+    def aux(pa, ps):
+        # We need to find the largest absolute value in the pulse height list
+        # to do the normalization. 
+        max = np.abs(ps[pa == 1]).max()
+        return ps[pa == 1] / max # Perform normalization
+
+    # Single training sample case
+    if photon_arrivals.shape[0] == 1 or len(photon_arrivals.shape) == 1:
+        if norm:
+            return aux(photon_arrivals, pulse_stream)
         return pulse_stream[photon_arrivals == 1]
+    # Batch case
+    if norm:
+        return aux(photon_arrivals, pulse_stream).reshape(photon_arrivals.shape[0], 1)
     return pulse_stream[photon_arrivals == 1].reshape(photon_arrivals.shape[0], 1)
 
 
