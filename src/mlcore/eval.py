@@ -64,7 +64,7 @@ def regression_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> float:
     This function first finds the mean prediction and target vectors in the
     batch and then returns the absolute difference between them (lower is better)
     """
-    return torch.abs(y_pred.mean(dim=0) - y_true.mean(dim=0)).sum().item()
+    return torch.abs(y_pred.mean().abs() - y_true.mean().abs()).item()
 
 def add_noise(pulse_list: List[np.array], range: float) -> None:
     """
