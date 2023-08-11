@@ -32,7 +32,7 @@ _RF = RFElectronics(gain=(3.0, 0, 0),
                     line_noise=_LINE_NOISE,
                     cable_delay=50e-9)
 
-def gen_iqp(qp_timestream: QuasiparticleTimeStream, norm: bool = True):
+def gen_iqp(qp_timestream: QuasiparticleTimeStream, norm: bool = True, noise_on: bool = True):
     """
     Generate I, Q, and Phase Response time streams using the mkidreadoutanalysis library
 
@@ -44,7 +44,7 @@ def gen_iqp(qp_timestream: QuasiparticleTimeStream, norm: bool = True):
     """
 
     # Create Photon Resonator Readout
-    readout = ReadoutPhotonResonator(_RES, qp_timestream, _FREQ_GRID, _RF, noise_on=True)
+    readout = ReadoutPhotonResonator(_RES, qp_timestream, _FREQ_GRID, _RF, noise_on=noise_on)
 
     # Return I, Q, and Phase Response timestreams
     if norm:
@@ -112,10 +112,11 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
                  with_pulses: list,
                  no_pulses: list,
                  single_pulse: bool,
+                 noise_on: bool,
                  cps=500,
                  edge_padding=0,
                  window_size=150,
-                 normalize: bool = True
+                 normalize: bool = True,
             ) -> None:
     # Generate the training set in the following format: [np.array([i,q, photon_arrivals, qp_densities, phase_resp]), ...]
     # where i,q,... are all WINDOW_SIZE length arrays.
@@ -129,7 +130,7 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
         qp_timestream.gen_quasiparticle_pulse(magnitude=min(magnitudes)/random.choice(magnitudes))
         photon_arrivals = qp_timestream.gen_photon_arrivals(cps=cps, seed=None)
         qp_densities = qp_timestream.populate_photons() 
-        I, Q, phase_resp = gen_iqp(qp_timestream, normalize)
+        I, Q, phase_resp = gen_iqp(qp_timestream, normalize, noise_on)
         create_windows(I,
                        Q,
                        photon_arrivals,
