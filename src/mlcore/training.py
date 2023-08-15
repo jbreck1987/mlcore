@@ -6,7 +6,8 @@ architectures
 # Date: 7/26/2023
 
 import torch
-from typing import Tuple, Dict
+from typing import Any, Tuple, Dict
+from math import isclose
 
 def train_step(model: torch.nn.Module,
                data_loader: torch.utils.data.DataLoader,
@@ -169,5 +170,87 @@ def make_predictions(model: torch.nn.Module, samples: list) -> list:
     model.eval()
     with torch.inference_mode():
         return [torch.tensor(model(x)) for x in samples]
+
+
+class EarlyStop:
+    """
+    This is a simple class that stops a run early if they model seems
+    to be saturating and/or diverging.
+
+    Inputs:
+        -div_threshold (float): The difference in the two metrics that should be considered being divergent
+        -sat_tolerance (int): The allowed number of steps for which the minimum value of the tracked
+         metric has not been updated
+        -div_tolerance (int): The allowed number of steps for which the two tracked metrics have
+         been considered divereged (div_threshold met)
+        -sat_metric (bool): Which metric to choose to track to determine whether a training session
+         has saturated. This can either be 0 or 1, which corressponds to the first
+         and second metrics passed into the object when calling.
+        -track_sat/div (bool): Determines whether or not to track saturation and/or divergence.
+
+
+    """
+
+    def __init__(self,
+                 sat_tolerance: int = 0,
+                 div_tolerance: int = 0,
+                 div_threshold: float = 0.5,
+                 sat_metric: bool = 0,
+                 track_div: bool = False,
+                 track_sat: bool = False
+                ):
+        
+        if not (track_sat or track_div):
+            raise RuntimeError('Either saturation or divergence tracking needs to be enabled.')
+
+        self.st = sat_tolerance
+        self.dt = div_tolerance
+        self.s_metric = sat_metric
+        self.s_track = track_sat
+        self.d_track = track_div
+        self.d_threshold = div_threshold
+        self.s_min = None
+        self.s_counter = 0
+        self.d_counter = 0
+
+    # Define methods to determine whether or the metric(s) have saturated/diverged
+    def _check_saturated(self, metric: float) -> bool:
+        if self.s_min == None or metric < self.s_min:
+            self.s_min = metric
+            self.s_counter = 0
+            return False
+        elif self.s_counter < self.st:
+            self.s_counter += 1
+            return False
+        else:
+            return True
+    
+    def _check_diverged(self, metric1: float, metric2: float) -> bool:
+        if isclose(metric1, metric2, abs_tol=self.d_threshold):
+            self.d_counter = 0
+            return False
+        elif self.d_counter < self.dt:
+            self.d_counter += 1
+            return False
+        else:
+            return True
+        
+    def reset(self) -> None:
+        self.s_counter = 0
+        self.d_counter = 0
+    
+    def __call__(self, metric1: float, metric2: float) -> bool:
+        sat_res = False
+        div_res = False
+
+        if self.s_track:
+            if self.s_metric:
+                sat_res = self._check_saturated(metric2)
+            else:
+                sat_res = self._check_saturated(metric1)
+        if self.d_track:
+            div_res = self._check_diverged(metric1, metric2)
+        return sat_res or div_res
+
 
 
