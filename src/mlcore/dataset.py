@@ -28,7 +28,7 @@ _LINE_NOISE = LineNoise(freqs=[60, 50e3, 100e3, 250e3, -300e3, 300e3, 500e3],
                         fs=1e3)
 _RF = RFElectronics(gain=(3.0, 0, 0),
                     phase_delay=0,
-                    white_noise_scale=10,
+                    white_noise_scale=30,
                     line_noise=_LINE_NOISE,
                     cable_delay=50e-9)
 
