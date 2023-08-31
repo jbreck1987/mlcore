@@ -163,13 +163,23 @@ def multi_loss_test_step(model: torch.nn.Module,
     return {f'{idx}': {'loss': total_loss[idx].item(), 'acc': acc[idx].item()} for idx in range(len(loss_fn))}
 
 
-def make_predictions(model: torch.nn.Module, samples: list) -> list:
+def make_predictions(model: torch.nn.Module, samples: list, device: torch.device) -> list:
     """
-    Given a list of samples, returns a tensor with the prediction for each sample
+    Given a list of samples, returns a list with the prediction for each sample
     """
+    # Move model and input data to passed device
+    model.to(device=device)
+    s = [sample.to(device=device) for sample in samples]
+
     model.eval()
     with torch.inference_mode():
-        return [torch.tensor(model(x)) for x in samples]
+        # This comprehension creates a list of predictions on the samples that have been moved to the passed in device
+        # and then moves that prediction back to original device according to the corresponding original sample
+        # passed into the function. It then makes sure the returned prediction is a Pytorch tensor.
+        # Not very memory efficient as-is, but makes sure the returned predictions can be used in later
+        # code without dealing device mismatches.
+        return [torch.tensor(model(sample)).to(dev) for sample, dev in zip(s, [x.device for x in samples])]
+    
 
 
 class EarlyStop:
@@ -187,8 +197,6 @@ class EarlyStop:
          has saturated. This can either be 0 or 1, which corressponds to the first
          and second metrics passed into the object when calling.
         -track_sat/div (bool): Determines whether or not to track saturation and/or divergence.
-
-
     """
 
     def __init__(self,
@@ -213,7 +221,7 @@ class EarlyStop:
         self.s_counter = 0
         self.d_counter = 0
 
-    # Define methods to determine whether or the metric(s) have saturated/diverged
+    # Define methods to determine whether the metric(s) have saturated/diverged
     def _check_saturated(self, metric: float) -> bool:
         if self.s_min == None or metric < self.s_min:
             self.s_min = metric
