@@ -5,6 +5,8 @@ for different model architectures and experiments.
 import numpy as np
 import torch
 import numpy
+from itertools import repeat
+from functools import reduce
 import math
 import random
 from warnings import warn
@@ -151,6 +153,60 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
             count = len(with_pulses)
     print(f'\nNumber of samples with pulses: {len(with_pulses)}')
     print(f'Number of samples without pulses: {len(no_pulses)}')
+
+def make_arrivals(num_samples: int, window_size: int, edge_pad: int, flatten: bool= False, shuffle: bool = True, seed = None) -> np.array:
+    """
+    Creates photon arrival timestream in training sample format (E.g. In the shape (num_samples, window_size), where window_size 
+    is the length of the training sample). The function will also shuffle the indices if desired and will flatten the output. This is 
+    useful if you need the timestream for other tools that most likely do not need the sample format.
+    """
+    # Catch incorrect inputs
+    if 2 * edge_pad >= window_size:
+       raise ArithmeticError('Window size needs to be > than 2 x edge pad')
+
+    # Create identity array
+    id_mat = np.identity(window_size - (2 * edge_pad), dtype=np.int8)
+   
+    # Stack the identity matrix to get the number of samples necessary. 
+    # Due to the identity matrix being square, need to do some checking on whether the side length of the identity matrix divides
+    # the number of samples requested. This clause catches the case where there will be a remainder.
+    if num_samples % id_mat.shape[0] != 0:
+        remain = num_samples % id_mat.shape[0]
+
+        # Find largest value less than the number of requested samples that the identity array side length divides
+        # and create a stacked array to give that number of samples.
+        # This is a foldr on an iterable of repeated identity matrixes.
+        prim_arr = reduce(lambda acc, x: np.vstack((acc, x)), repeat(id_mat, int((num_samples - remain) / id_mat.shape[0])))
+
+        # The remanining number of samples to create will always be less than the side length of the identity matrix from above,
+        # get the rest of the samples to reach the requested value from one identity matrix and stack with the primary array
+        # created previously.
+        rem_arr = id_mat[:remain]
+    
+        # Stack the two arrays
+        samples = np.vstack((prim_arr, rem_arr))
+    
+        if shuffle:
+            rng = np.random.default_rng() if seed is None else np.random.default_rng(seed=seed)
+            rng.shuffle(samples) # in-place
+        # Pad the samples to get to the appropriate requested dimensions
+        samples = np.pad(samples, ((0,0),(edge_pad, edge_pad)), 'constant', constant_values=(0,))
+        if flatten:
+            samples = samples.flatten()
+        return samples
+   
+    # Otherwise, window size divides number of samples
+    samples = reduce(lambda acc, x: np.vstack((acc, x)), repeat(id_mat, int(num_samples / id_mat.shape[0])))
+    if shuffle:
+       rng = np.random.default_rng() if seed is None else np.random.default_rng(seed=seed)
+       rng.shuffle(samples) # in-place shuffling.
+
+    # Pad the samples
+    samples = np.pad(samples, ((0,0),(edge_pad, edge_pad)), 'constant', constant_values=(0,))
+    if flatten:
+        samples = samples.flatten()
+    return samples
+
 
 
 def save_training_data(in_array: Any,
