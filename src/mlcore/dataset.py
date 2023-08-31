@@ -82,7 +82,7 @@ def create_windows(i: numpy.array,
         valid_window_end = window + window_size - edge_padding
         valid_pulses = ((window_pulse_idxs > valid_window_start) & (window_pulse_idxs < valid_window_end)).all() # No pulses in edge pad ranges
 
-        # If there are more than one pulses in the entire window and we only want single pulse data, skip this window
+        # If more than one pulse in the entire window and we only want single pulse data, skip this window
         if window_pulses > 1 and single_pulse:
             continue
 
@@ -127,7 +127,9 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
         # gen_photon_arrivals() method to change the photon flux per iteration and also modulate the
         # quasiparticle density to get different pulse heights.
         # Note that the magniutdes are normalized to the lowest in the list (I.E. shortest wavelength has largest energy -> highest change in qp density)
-        qp_timestream.gen_quasiparticle_pulse(magnitude=min(magnitudes)/random.choice(magnitudes))
+        # if the list has multiple magnitudes. Otherwise, the magnitude is used as-is.
+        pulse_mag = magnitudes[0] if len(magnitudes) == 1 else min(magnitudes)/random.choice(magnitudes)
+        qp_timestream.gen_quasiparticle_pulse(magnitude=pulse_mag)
         photon_arrivals = qp_timestream.gen_photon_arrivals(cps=cps, seed=None)
         qp_densities = qp_timestream.populate_photons() 
         I, Q, phase_resp = gen_iqp(qp_timestream, normalize, noise_on)
