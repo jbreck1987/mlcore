@@ -13,43 +13,62 @@ from warnings import warn
 import datetime as dt
 import pathlib
 from typing import List, Any, Tuple
+from hashlib import md5
+import os
+from shutil import copy2
+
+import ruamel.yaml as yaml
 
 from mkidreadoutanalysis.quasiparticletimestream import QuasiparticleTimeStream
 from mkidreadoutanalysis.resonator import Resonator, FrequencyGrid, RFElectronics, ReadoutPhotonResonator, LineNoise
+from mkidreadoutanalysis.optimal_filters.make_filters import Calculator
 
 ### DATASET GENERATION FUNCTIONS ###
 #----------------------------------#
 
-# Define constant resonator, readout electronics, noise, and frequency sweep objects
-_RES = Resonator(f0=4.0012e9, qi=200000, qc=15000, xa=1e-9, a=0, tls_scale=1e2)
-_FREQ_GRID = FrequencyGrid(fc=_RES.f0, points=1000, span=500e6)
-_LINE_NOISE = LineNoise(freqs=[60, 50e3, 100e3, 250e3, -300e3, 300e3, 500e3],
-                        amplitudes=[0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.01],
-                        phases=[0, 0.5, 0,1.3,0.5, 0.2, 2.4],
-                        n_samples=100,
-                        fs=1e3)
-_RF = RFElectronics(gain=(3.0, 0, 0),
-                    phase_delay=0,
-                    white_noise_scale=30,
-                    line_noise=_LINE_NOISE,
-                    cable_delay=50e-9)
-
-def gen_iqp(qp_timestream: QuasiparticleTimeStream, norm: bool = True, noise_on: bool = True):
+def gen_iqp(qp_timestream: QuasiparticleTimeStream, conf_var: dict, white_noise_scale: float):
     """
     Generate I, Q, and Phase Response time streams using the mkidreadoutanalysis library
 
     Inputs: 
         qp_timestream: This object should have the photons generated before passing
-        norm: Determines whether to return normalized or non-normalized I/Q response
+        conf_var: Dict that has all of the configuration values to generate the appropriate
+        objects necessary go generate the resulting time streams.
     
     Returns: tuple of three numpy arrays containing the I, Q, and Phase Response timestreams respectively.
     """
 
+    # Decompose the configuration variable dict into sub-components
+    res_conf = conf_var['resonator']
+    f_grid_conf = conf_var['freq_grid']
+    noise_conf = conf_var['noise']
+    coords_conf = conf_var['coordinates']
+
+    res = Resonator(f0=res_conf['f0'],
+                    qi=res_conf['qi'],
+                    qc=res_conf['qc'],
+                    xa=res_conf['xa'],
+                    a=res_conf['a'],
+                    tls_scale=res_conf['tls_scale']
+                    )
+    f_grid = FrequencyGrid(fc=f_grid_conf['fc'], points=f_grid_conf['points'], span=f_grid_conf['span'])
+    line_noise = LineNoise(freqs=noise_conf['line_noise']['freqs'],
+                            amplitudes=noise_conf['line_noise']['amplitudes'],
+                            phases=noise_conf['line_noise']['phases'],
+                            n_samples=noise_conf['line_noise']['n_samples'],
+                            fs=noise_conf['line_noise']['fs']
+                            )
+    rf = RFElectronics(gain=tuple(noise_conf['rf_electronics']['gain']),
+                        phase_delay=noise_conf['rf_electronics']['phase_delay'],
+                        white_noise_scale=white_noise_scale,
+                        line_noise=line_noise,
+                        cable_delay=noise_conf['rf_electronics']['cable_delay']
+                        )
     # Create Photon Resonator Readout
-    readout = ReadoutPhotonResonator(_RES, qp_timestream, _FREQ_GRID, _RF, noise_on=noise_on)
+    readout = ReadoutPhotonResonator(res, qp_timestream, f_grid, rf, noise_on=noise_conf['noise_on'])
 
     # Return I, Q, and Phase Response timestreams
-    if norm:
+    if coords_conf['normalize_iq']:
         return readout.normalized_iq.real, readout.normalized_iq.imag, readout.basic_coordinate_transformation()[0]
     return readout.iq_response.real, readout.iq_response.imag, readout.basic_coordinate_transformation()[0]
 
@@ -154,18 +173,42 @@ def make_dataset(qp_timestream: QuasiparticleTimeStream,
     print(f'\nNumber of samples with pulses: {len(with_pulses)}')
     print(f'Number of samples without pulses: {len(no_pulses)}')
 
-def make_arrivals(num_samples: int, window_size: int, edge_pad: int, flatten: bool= False, shuffle: bool = True, seed = None) -> np.array:
+def make_arrivals(num_samples: int,
+                  window_size: int,
+                  edge_pad: int,
+                  lam: float,
+                  single_pulse: bool = True,
+                  flatten: bool= False,
+                  shuffle: bool = True,
+                  seed = None) -> np.array:
     """
     Creates photon arrival timestream in training sample format (E.g. In the shape (num_samples, window_size), where window_size 
     is the length of the training sample). The function will also shuffle the indices if desired and will flatten the output. This is 
-    useful if you need the timestream for other tools that most likely do not need the sample format.
+    useful if you need the timestream for other tools that most likely do not need the sample format. The complexity is due to guaranteeing
+    that all indices within the valid window will have at least one sample as long as the number of samples is larger than the valid window size.
     """
     # Catch incorrect inputs
     if 2 * edge_pad >= window_size:
        raise ArithmeticError('Window size needs to be > than 2 x edge pad')
+    
+    # If requesting multiple pulses per window, call function defined to handle that case.
+    if single_pulse is False:
+        return make_arrivals_multi(num_samples, window_size, edge_pad, lam, flatten, seed)
 
-    # Create identity array
-    id_mat = np.identity(window_size - (2 * edge_pad), dtype=np.int8)
+    # Create identity array. If the window size is larger than the number of samples
+    # only take the number of rows up to the size of number of samples and return.
+    id_mat = np.identity(window_size - (2 * edge_pad), dtype=bool)
+    if num_samples < window_size:
+        samples = id_mat[:num_samples]
+        if shuffle:
+            rng = np.random.default_rng() if seed is None else np.random.default_rng(seed=seed)
+            rng.shuffle(samples) # in-place
+        # Pad the samples to get to the appropriate requested dimensions
+        samples = np.pad(samples, ((0,0),(edge_pad, edge_pad)), 'constant', constant_values=(0,))
+        if flatten:
+            samples = samples.flatten()
+        return samples
+
    
     # Stack the identity matrix to get the number of samples necessary. 
     # Due to the identity matrix being square, need to do some checking on whether the side length of the identity matrix divides
@@ -206,6 +249,134 @@ def make_arrivals(num_samples: int, window_size: int, edge_pad: int, flatten: bo
     if flatten:
         samples = samples.flatten()
     return samples
+
+def make_arrivals_multi(num_samples: int, window_size: int, edge_pad: int, lam: float, flatten: bool = False, seed=None):
+    """
+    Creates photon arrival timestream in training sample format (E.g. In the shape (num_samples, window_size),
+    for scenarios where multiple pulses per window are requried. The function will also flatten the output if desired.
+    This is useful if you need the timestream for other tools that most likely do not need the sample format.
+    """
+
+    # Find length of array where pulses are allowed
+    mat_len = window_size - 2 * edge_pad
+
+    # Create photon arrivals using Poisson statistics
+    rng = np.random.default_rng() if seed is None else np.random.default_rng(seed)
+    arrivals_mat = np.array(np.vstack([rng.poisson(lam=lam, size=mat_len) for _ in range(num_samples)]), dtype=bool)
+
+    # Pad the photon arrivals matrix with the appropriate edge padding and return
+    if flatten:
+        return np.pad(arrivals_mat, ((0,0),(edge_pad, edge_pad)), 'constant', constant_values=(0,)).flatten()
+    return np.pad(arrivals_mat, ((0,0),(edge_pad, edge_pad)), 'constant', constant_values=(0,))
+
+
+def gen_data_dir(file, out_parent_path: pathlib.Path):
+    """
+    This file generates a directory based on the md5 hash of the data_conf.yaml file
+    object that is passed in. This hash will be used to determine whether or not data is unique
+    to reduce data duplication. The directory name will be the md5 hash of the data_conf.yaml
+    file and will contain a copy of the data_conf.yaml file and the npz file with the actual data.
+
+    Returns True if the directory already exists, otherwise returns Path of the newly created
+    directory.
+    """
+
+    # Generate the md5 hash of the passed in data_conf.yaml file.
+    hash = 'a' + str(md5(file.read()).hexdigest())
+
+    # Try to create a new subdirectory under the passed in parent directory
+    # with the hash name. If it exists already, os.mkdir will raise.
+    try:
+        os.mkdir(pathlib.Path(out_parent_path, hash))
+    except FileExistsError as e:
+        print(f'Data already exists with hash: {hash}')
+        return True
+    # Otherwise, directory was created, return path
+    return pathlib.Path(out_parent_path, hash)
+
+
+
+def make_data(data_conf_path: pathlib.Path, out_parent_path: pathlib.Path, low_pass_coe: list = None, optimal_filt: Calculator = None) -> None:
+
+    # Check to see if path exists
+    with open(data_conf_path, 'rb') as f:
+        # Generate the new data directory (or return if it already exists)
+        path_ret = gen_data_dir(f, out_parent_path)
+        if not isinstance(path_ret, pathlib.Path):
+            return None
+
+    # Load and parse the yaml file
+    with open(data_conf_path, 'r') as f:
+        # yaml needs the file as text, not bytes
+        conf_var = yaml.safe_load(f)
+
+    # Decompose the configuration variable dict into sub-components
+    general_conf = conf_var['general']
+    qpt_conf = conf_var['quasiparticle']
+
+    # Generate photon arrival timestream
+    photon_arrivals = make_arrivals(
+        general_conf['num_samples'],
+        general_conf['window_size'],
+        general_conf['edge_pad'],
+        lam= qpt_conf['cps'] / general_conf['fs'],
+        single_pulse=general_conf['single_pulse'],
+        flatten=True,
+        shuffle=True,
+        seed=general_conf['random_seed']
+    )
+
+    # Using config dict and photon arrivals, generate a new quasiparticle timestream
+    # object. The size of the "data" member must match the length of the flattened photon
+    # arrivals array.
+    qpt = QuasiparticleTimeStream(fs=general_conf['fs'], ts=int(photon_arrivals.size / general_conf['fs']))
+    qpt.photon_arrivals = photon_arrivals
+
+    # quasiparticle shift magnitude and white noise scale are the two major
+    # variables that will be changed in the training data. Loop over all the
+    # passed in values for these variables.
+    ret_arr = []
+    for mag in qpt_conf['qp_shift_magnitudes']:
+        for scale in conf_var['noise']['rf_electronics']['white_noise_scale']:
+            qpt.gen_quasiparticle_pulse(magnitude=mag)
+            _ = qpt.populate_photons()
+
+            # Generate time streams
+            print(f'Generating time streams for mag: {mag}, noise_scale: {scale}...')
+
+            # If there is no optimal filter object passed in,
+            # I/Q streams should be noisy but the phase_response should
+            # be ideal (no noise).
+            if optimal_filt is None:
+                # Get noisy I/Q data
+                i, q, _ = gen_iqp(qpt, conf_var, white_noise_scale=scale)
+
+                # Toggle noise switch to get ideal phase response
+                # timestream, then reactivate
+                conf_var['noise']['noise_on'] = False
+                _, _, phase_response = gen_iqp(qpt, conf_var, white_noise_scale=scale)
+                conf_var['noise']['noise_on'] = True
+
+            # Save the data to the appropriate location in the appropriate format
+            # (See save_training_data docstring for format)
+            ret_arr.append(np.stack((i.reshape(general_conf['num_samples'], general_conf['window_size']),
+                                     q.reshape(general_conf['num_samples'], general_conf['window_size']),
+                                     photon_arrivals.reshape(general_conf['num_samples'], general_conf['window_size']),
+                                     qpt.data.reshape(general_conf['num_samples'], general_conf['window_size']),
+                                     phase_response.reshape(general_conf['num_samples'], general_conf['window_size'])), axis=1))
+
+
+    print(f'Saving data...')
+    save_training_data(np.vstack(ret_arr),
+                       path_ret,
+                       path_ret.stem)
+    
+    print(f'Saved data to {path_ret}.')
+
+    # Copy the data_conf.yaml file to the newly created directory
+    copy_dir = copy2(data_conf_path, path_ret)
+    print(f'Copied yaml config file to {copy_dir}.')
+
 
 
 
