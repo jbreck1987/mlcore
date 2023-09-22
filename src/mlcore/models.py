@@ -7,7 +7,8 @@ Model definitions to be used in runs.
 
 from torch import nn
 import torch
-    
+from collections.abc import Iterable 
+ 
 class BranchedConvReg(nn.Module):
     def __init__(self, in_channels, h_hidden_units, h_hidden_layers) -> None:
         super().__init__()
@@ -354,3 +355,75 @@ class AELatentLayer(nn.Module):
 
     def forward(self, x):
         return nn.Linear(in_features=self.in_feat, out_features=self.out_feat, bias=self.bias)(x).reshape(self.out_shape)
+    
+class AENetwork(nn.Module):
+    """
+    This class represents either an Encoder or Decoder network in an Autoencoder architecture. It is variable in length,
+    based on the length of the parameter iterables in the kwargs. The class requires a single "layer" type
+    (such as the ConvEncoderLayer1D defined above) that is repeated many times in series, meaning that to create custom
+    implementations, one needs to define their own custom layer that inherits from nn.Module and combines more basic layers
+    defined by Pytorch (or smaller, custom layers, as long as they inherit from nn.Module). The kwargs should match the
+    arguments of the passed layer type and the sizes of the iterables should all match. This class does not check input/output
+    lengths between layers...
+
+    args:
+    -layer: The layer that will be instantiated and repeated many times to build the network
+
+    kwargs:
+    -The parameters that will be used when instantiating the layers (in the order that was passed). Each kwarg can
+    either be an iterable or a single value. If single value, this will be expanded to be used as the value in each layer.
+
+    Example:
+    `AENetwork(layer=ConvEncoderLayer1D, in_ch=(2, 8, 16), out_ch=(8, 16, 32), pad='same', ...)` will result in a 3 layer encoder network.
+    """
+    def __init__(self, layer: nn.Module, **params) -> None:
+        super().__init__()
+        self.layer = layer
+        self.params = params
+        
+        # Generate the list of modules to be used in the network
+        self.net = nn.Sequential(*self._gen_modulelist())
+    
+    @property
+    def num_layers(self):
+        return len(self.net)
+    
+    def _gen_modulelist(self):
+        """
+        Generates ModuleList containing the layers of the network
+        """
+
+        def aux(val, idx):
+            """
+            Auxiliary function to catch the non-string Iterable case when mapping
+            over the input params kwargs for unpacking.
+            """
+            # If the passed parameter is a non-string iterable, return the appropriate
+            # value at the correct index for this layer.
+            if isinstance(val, Iterable) and not isinstance(val, str):
+                return val[idx]
+            
+            # Return the same non-iterable value for each layer
+            return val
+        
+        def find_len(val):
+            """
+            Returns length of iterable if val is a non-string, iterable. Otherwise, returns 0. Will be used
+            to determine how many values are in each iterable passed in the params kwargs.
+            """
+            if isinstance(val, Iterable) and not isinstance(val, str):
+               return len(val)
+            return 0
+
+        # 'unpacked' contains an iterable of the dicts that will be used to
+        # instantiate each layer. 'idxs' used as the iterable in 'map' gives index to use when unpacking the kwargs
+        # and repacking into a dict for a specific layer. 'aux' is used to catch non-string iterables
+        # in the passed in kwargs (see def. above).
+        idxs = [x for x in range(max(map(find_len, self.params.values())))]
+        unpacked = map(lambda x: {key: aux(val, x) for key, val in self.params.items()}, idxs)
+
+        # Return ModuleList of the layers based on the number of dicts in the unpacked list.
+        return nn.ModuleList([self.layer(**xs) for xs in unpacked])
+
+    def forward(self, x):
+        return self.net(x)
