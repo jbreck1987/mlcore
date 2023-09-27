@@ -253,6 +253,7 @@ class ConvEncoderLayer1D(nn.Module):
     -pad: Padding used in the convolution layer; uses symmetrical 0 padding; See Conv1d docs for acceptable inputs.
     -pool_kernel_size: Kernel size used in the pooling layer
     -dropout_prob: Probability that a weight will be ignored during training step
+    -ignore_pool: Used to ignore the pooling layer addition. Use for final layers of a network where pooling isn't necessary
     """
     def __init__(self,
                  in_ch: int,
@@ -261,7 +262,8 @@ class ConvEncoderLayer1D(nn.Module):
                  stride: int,
                  pad: int | str,
                  pool_kernel_size: int,
-                 dropout_prob: float):
+                 dropout_prob: float,
+                 ignore_pool: bool):
         super().__init__()
         self.in_ch = in_ch
         self.out_ch = out_ch
@@ -280,8 +282,11 @@ class ConvEncoderLayer1D(nn.Module):
                       padding=pad),
             nn.ReLU(),
             nn.Dropout(p=dropout_prob),
-            nn.MaxPool1d(kernel_size=pool_kernel_size)
         )
+        if not ignore_pool:
+            self.ignore_pool = ignore_pool
+            self.net.append(nn.MaxPool1d(kernel_size=pool_kernel_size))
+
     
     def forward(self, x):
         return self.net(x)
@@ -289,7 +294,7 @@ class ConvEncoderLayer1D(nn.Module):
 class ConvDecoderLayer1D(nn.Module):
     """
     This is a convience class used to make code a little easier to parse when creating
-    models that use the Convolutional Autoencoder architecture. It combines commonly used Decoder
+    models that use the Convolutional Autoencoder architecture. It combines commonly used decoder
     layers into one layer. The class packages the Conv1d, ReLU, Upsample1d, and Dropout layers
     together.
 
@@ -301,6 +306,8 @@ class ConvDecoderLayer1D(nn.Module):
     -pad: Padding used in the convolution layer; uses symmetrical 0 padding; See Conv1d docs for acceptable inputs.
     -ups_kernel_size: Kernel size used in the upsampling layer
     -dropout_prob: Probability that a weight will be ignored during training step
+    -ignore_upsample: Used to ignore the Upsample layer addition. Useful for final the final layer in an encoder where pooling
+    isn't typically used.
     """
     def __init__(self,
                  in_ch: int,
@@ -309,7 +316,8 @@ class ConvDecoderLayer1D(nn.Module):
                  stride: int,
                  pad: int | str,
                  upsample_scale: int,
-                 dropout_prob: float):
+                 dropout_prob: float,
+                 ignore_upsample: bool):
         super().__init__()
         self.in_ch = in_ch
         self.out_ch = out_ch
@@ -318,6 +326,7 @@ class ConvDecoderLayer1D(nn.Module):
         self.pad = pad
         self.upsample_scale = upsample_scale
         self.dropout_prob = dropout_prob
+        self.ignore_upsample = ignore_upsample
 
         # Define container to store layers
         self.net = nn.Sequential(
@@ -328,11 +337,17 @@ class ConvDecoderLayer1D(nn.Module):
                       padding=pad),
             nn.ReLU(),
             nn.Dropout(p=dropout_prob),
-            nn.Upsample(scale_factor=upsample_scale)
+                
         )
+        if not ignore_upsample:
+            self.ignore_upsample = ignore_upsample
+            self.net.append(nn.Upsample(scale_factor=upsample_scale))
+
     
     def forward(self, x):
         return self.net(x)
+
+
 
 class AELatentLayer(nn.Module):
     """
@@ -368,10 +383,13 @@ class AENetwork(nn.Module):
 
     args:
     -layer: The layer that will be instantiated and repeated many times to build the network
+    -drop_final: This will drop the last instance of the passed in nn.Module class found in the
+    generated ModuleList. This is useful for cases where you don't need to Upsample or Pool in the final
+    custom layer.
 
     kwargs:
     -The parameters that will be used when instantiating the layers (in the order that was passed). Each kwarg can
-    either be an iterable or a single value. If single value, this will be expanded to be used as the value in each layer.
+    either be an iterable or a single value. If single value, this will be "broadcasted" to be used as the value in each layer.
 
     Example:
     `AENetwork(layer=ConvEncoderLayer1D, in_ch=(2, 8, 16), out_ch=(8, 16, 32), pad='same', ...)` will result in a 3 layer encoder network.
@@ -403,7 +421,7 @@ class AENetwork(nn.Module):
             if isinstance(val, Iterable) and not isinstance(val, str):
                 return val[idx]
             
-            # Return the same non-iterable value for each layer
+            # Return the same non-iterable value for each layer. This implements the broadcasting logic.
             return val
         
         def find_len(val):
@@ -423,7 +441,55 @@ class AENetwork(nn.Module):
         unpacked = map(lambda x: {key: aux(val, x) for key, val in self.params.items()}, idxs)
 
         # Return ModuleList of the layers based on the number of dicts in the unpacked list.
-        return nn.ModuleList([self.layer(**xs) for xs in unpacked])
+        return nn.ModuleList([self.layer(**xs) for xs in unpacked]) 
+
 
     def forward(self, x):
         return self.net(x)
+
+
+class ModConvAE(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.encoder = nn.Sequential(
+            AENetwork(
+                ConvEncoderLayer1D,
+                in_ch=(1, 8, 16, 32),
+                out_ch=(8, 16, 32, 64),
+                kernel_size=(10, 10, 5, 5),
+                stride=1,
+                pad='same',
+                pool_kernel_size=5,
+                dropout_prob=0.5,
+                ignore_pool=(False, False, False, True)
+            ),
+            nn.Flatten()
+        )
+        self.decoder = nn.Sequential(
+            AENetwork(
+                ConvDecoderLayer1D,
+                in_ch=(64, 32, 16),
+                out_ch=(32, 16, 8),
+                kernel_size=(5, 5, 10),
+                stride=1,
+                pad='same',
+                upsample_scale=5,
+                dropout_prob=0.5,
+                ignore_upsample=False
+            ),
+            nn.Conv1d(8, 1, kernel_size=10, padding='same', stride=1),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x):
+        latent = self.encoder(x)
+
+        # Need to find the final filter size before flattening to reshape the 
+        # latent tensor before input to the decoder network
+        if isinstance(self.encoder[0].params['out_ch'], Iterable):
+            # Get the last filter size in the iterable if iterable.
+            out_filt_size = self.encoder[0].params['out_ch'][len(self.encoder[0].params['out_ch']) - 1]
+        else:
+            out_filt_size = self.encoder[0].params['out_ch']
+
+        return self.decoder(latent.reshape((latent.shape[0], out_filt_size, latent.shape[1] // out_filt_size)))

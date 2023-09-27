@@ -4,24 +4,25 @@ for different model architectures and experiments.
 """
 import numpy as np
 import torch
-import numpy
 from itertools import repeat
 from functools import reduce
-import math
-import random
 from warnings import warn
 import datetime as dt
 import pathlib
 from typing import List, Any, Tuple
+from collections.abc import Iterable
+from types import FunctionType
 from hashlib import md5
 import os
 from shutil import copy2
+from inspect import getmembers, isclass
 
 import ruamel.yaml as yaml
 
 from mkidreadoutanalysis.quasiparticletimestream import QuasiparticleTimeStream
 from mkidreadoutanalysis.resonator import Resonator, FrequencyGrid, RFElectronics, ReadoutPhotonResonator, LineNoise
 from mkidreadoutanalysis.optimal_filters.make_filters import Calculator
+import mlcore.dataset.yaml_constructors as yaml_constructors
 
 ### DATASET GENERATION FUNCTIONS ###
 #----------------------------------#
@@ -72,106 +73,6 @@ def gen_iqp(qp_timestream: QuasiparticleTimeStream, conf_var: dict, white_noise_
         return readout.normalized_iq.real, readout.normalized_iq.imag, readout.basic_coordinate_transformation()[0]
     return readout.iq_response.real, readout.iq_response.imag, readout.basic_coordinate_transformation()[0]
 
-def create_windows(i: numpy.array,
-                   q: numpy.array,
-                   photon_arrivals: numpy.array,
-                   qp_densities: numpy.array,
-                   phase_responses: numpy.array,
-                   with_pulses: list,
-                   no_pulses: list,
-                   single_pulse: bool,
-                   num_samples: int,
-                   no_pulse_fraction: float,
-                   edge_padding: int,
-                   window_size: int,
-                ) -> None:
-    """
-    This function takes the output of the mkidreadoutanalysis objects (I stream, Q stream, etc... ) and chunks it into smaller arrays. The code
-    also separates chunks with photons and those without photons with the goal of limiting the number of samples
-    without photon pulses since there are vastly more windows in the synthetic data in this category. It uses "scanning" logic to scan over the full
-    arrays with a given window size and inspects that window for a photon event. The window is then added to the appropriate container (photon/no photon).
-    """
-
-    # First determine the last index in the scanning range (need to have length of photon arrivals array be multiple of window_size)
-    end_idx = math.floor(len(photon_arrivals) / window_size) * window_size
-
-    # Now scan across the photon arrival vector and look at windows of length window_size with and without photon events
-    for window in range(0, end_idx - window_size + 1, window_size):
-        window_pulses = np.sum(photon_arrivals[window : window + window_size] == 1)
-        window_pulse_idxs = np.argwhere(photon_arrivals[window : window + window_size])
-        valid_window_start = window + edge_padding
-        valid_window_end = window + window_size - edge_padding
-        valid_pulses = ((window_pulse_idxs > valid_window_start) & (window_pulse_idxs < valid_window_end)).all() # No pulses in edge pad ranges
-
-        # If more than one pulse in the entire window and we only want single pulse data, skip this window
-        if window_pulses > 1 and single_pulse:
-            continue
-
-        # Now any window with a pulse is valid as long as the pulse(s) dont live in the edge padding areas
-        elif window_pulses > 0 and valid_pulses:
-            # If so add the window to the with_pulses container
-            with_pulses.append(np.vstack((i[window : window + window_size],
-                                          q[window : window + window_size],
-                                          photon_arrivals[window : window + window_size],
-                                          qp_densities[window : window + window_size],
-                                          phase_responses[window : window + window_size])).reshape(5, window_size)) # Reshaping to get in nice form for CNN
-
-        # If no pulses are in the window and the no-pulse fraction hasn't been met,
-        # add to the no_pulses container
-        elif len(no_pulses) < num_samples * no_pulse_fraction and window_pulses == 0:
-            no_pulses.append(np.vstack((i[window : window + window_size],
-                                        q[window : window + window_size],
-                                        photon_arrivals[window : window + window_size],
-                                        qp_densities[window : window + window_size],
-                                        phase_responses[window : window + window_size])).reshape(5, window_size)) # Reshaping to get in nice form for CNN
-
-
-def make_dataset(qp_timestream: QuasiparticleTimeStream,
-                 magnitudes: List[int],
-                 num_samples: int,
-                 no_pulse_fraction: float,
-                 with_pulses: list,
-                 no_pulses: list,
-                 single_pulse: bool,
-                 noise_on: bool,
-                 cps=500,
-                 edge_padding=0,
-                 window_size=150,
-                 normalize: bool = True,
-            ) -> None:
-    # Generate the training set in the following format: [np.array([i,q, photon_arrivals, qp_densities, phase_resp]), ...]
-    # where i,q,... are all WINDOW_SIZE length arrays.
-    # Each list element is a 5 x WINDOW_SIZE numpy array.
-    count = len(with_pulses)
-    while len(with_pulses) < num_samples - (num_samples * no_pulse_fraction):
-        # We want the training data to be varied, so lets use the Poisson sampled
-        # gen_photon_arrivals() method to change the photon flux per iteration and also modulate the
-        # quasiparticle density to get different pulse heights.
-        # Note that the magniutdes are normalized to the lowest in the list (I.E. shortest wavelength has largest energy -> highest change in qp density)
-        # if the list has multiple magnitudes. Otherwise, the magnitude is used as-is.
-        pulse_mag = magnitudes[0] if len(magnitudes) == 1 else min(magnitudes)/random.choice(magnitudes)
-        qp_timestream.gen_quasiparticle_pulse(magnitude=pulse_mag)
-        photon_arrivals = qp_timestream.gen_photon_arrivals(cps=cps, seed=None)
-        qp_densities = qp_timestream.populate_photons() 
-        I, Q, phase_resp = gen_iqp(qp_timestream, normalize, noise_on)
-        create_windows(I,
-                       Q,
-                       photon_arrivals,
-                       qp_densities,
-                       phase_resp,
-                       with_pulses,
-                       no_pulses,
-                       single_pulse,
-                       num_samples,
-                       no_pulse_fraction,
-                       window_size=window_size,
-                       edge_padding=edge_padding)
-        # Give status update on number of samples with photons
-        if len(with_pulses) > count:
-            print(f'Num samples with photons: {len(with_pulses)}/{num_samples - (num_samples * no_pulse_fraction)}', end='\r')
-            count = len(with_pulses)
-    print(f'\nNumber of samples with pulses: {len(with_pulses)}')
-    print(f'Number of samples without pulses: {len(no_pulses)}')
 
 def make_arrivals(num_samples: int,
                   window_size: int,
@@ -189,7 +90,7 @@ def make_arrivals(num_samples: int,
     """
     # Catch incorrect inputs
     if 2 * edge_pad >= window_size:
-       raise ArithmeticError('Window size needs to be > than 2 x edge pad')
+       raise ArithmeticError('Window size needs to be > than 2 * edge pad')
     
     # If requesting multiple pulses per window, call function defined to handle that case.
     if single_pulse is False:
@@ -210,7 +111,7 @@ def make_arrivals(num_samples: int,
         return samples
 
    
-    # Stack the identity matrix to get the number of samples necessary. 
+    # If number of requested samples is larger than window size, stack multiple identiy matrices to get the number of samples necessary. 
     # Due to the identity matrix being square, need to do some checking on whether the side length of the identity matrix divides
     # the number of samples requested. This clause catches the case where there will be a remainder.
     if num_samples % id_mat.shape[0] != 0:
@@ -293,8 +194,6 @@ def gen_data_dir(file, out_parent_path: pathlib.Path):
         return True
     # Otherwise, directory was created, return path
     return pathlib.Path(out_parent_path, hash)
-
-
 
 def make_data(data_conf_path: pathlib.Path, out_parent_path: pathlib.Path, low_pass_coe: list = None, optimal_filt: Calculator = None) -> None:
 
@@ -443,6 +342,61 @@ def load_training_data(filepath: pathlib.Path,
     # Load with given labels. Not doing any special handling of exceptions, will let the numpy API raise.
     with np.load(filepath) as f:
         return tuple([f[label] for label in labels])
+
+#### YAML Constructors ####
+def extend_yaml_loader(loader: yaml.SafeLoader, constructor: type, tag: str = None) -> None:
+    """
+    Takes a YAML loader, YAML constructor tag, and constructor class and adds the constructor to the loader.
+    Note that the constructor ID must begin with "!"; E.g. "!TimestreamConf". Uses the name of the class
+    to create the tag by default (this dunder needs to be defined in your constructors!)
+    """
+    if tag is not None:
+        loader.constructor.add_constructor(tag, yaml_constructor(constructor))
+    else:
+        loader.constructor.add_constructor(f'!{constructor.__name__}', yaml_constructor(constructor))
+
+def yaml_constructor(cls: type) -> FunctionType:
+    """
+    Builds the YAML constructor function for the passed in class since the
+    yaml "add_constructor" method only expects two arguments (loader and node).
+    Removes the need to define a unique constructor function for each class.
+    E.g. `loader.add_constructor('!my_loader', yaml_constructor(my_loader_class))`
+    """
+    def f(a, b):
+        return cls(**a.construct_mapping(b))
+    return f
+
+
+### NEW DATASET GENERATION FUNCTIONS ###
+
+def data_config_loader(data_conf_path: pathlib.Path, constructors: Iterable[type] = None, tags: Iterable[str] = None) -> dict:
+    """
+    Performs YAML handling, such as adding custom constructors to the YAML loader, and loads the
+    data creation configuration file. Will load and add all the constructors in the yaml_constructors
+    module by default. Otherwise, will need to pass specific constructors (and, optionally, their tags).
+    """
+
+    # Build loader with appropriate custom constructors
+    loader = yaml.YAML(typ='safe')
+    if constructors is None:
+        # Get iterable of all pre-defined constructors
+        cons = [con for _, con in getmembers(yaml_constructors) if isclass(con)]
+
+        # Add all constructors to the loader
+        _ = list(map(lambda x: extend_yaml_loader(loader, x), cons))
+    if constructors is not None and tags is not None:
+        # Only add the passed in constructors and their associated tags to the loader
+        _ = list(map(lambda x, y: extend_yaml_loader(loader, x, y), constructors, tags))
+
+    if constructors is not None:
+        # Only add the passed in constructors with the default tag as the class name
+        _ = list(map(lambda x: extend_yaml_loader(loader, x), constructors))
+    
+    # Load the YAML config file and return the config dict
+    with open(data_conf_path, 'rb') as f:
+        ret = loader.load(f)
+    return ret
+    
 
     
 
