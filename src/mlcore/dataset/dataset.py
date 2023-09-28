@@ -15,7 +15,7 @@ from types import FunctionType
 from hashlib import md5
 import os
 from shutil import copy2
-from inspect import getmembers, isclass
+from inspect import getmembers, isclass, getfullargspec
 
 import ruamel.yaml as yaml
 
@@ -81,7 +81,7 @@ def make_arrivals(num_samples: int,
                   single_pulse: bool = True,
                   flatten: bool= False,
                   shuffle: bool = True,
-                  seed = None) -> np.array:
+                  random_seed = None) -> np.array:
     """
     Creates photon arrival timestream in training sample format (E.g. In the shape (num_samples, window_size), where window_size 
     is the length of the training sample). The function will also shuffle the indices if desired and will flatten the output. This is 
@@ -94,7 +94,7 @@ def make_arrivals(num_samples: int,
     
     # If requesting multiple pulses per window, call function defined to handle that case.
     if single_pulse is False:
-        return make_arrivals_multi(num_samples, window_size, edge_pad, lam, flatten, seed)
+        return make_arrivals_multi(num_samples, window_size, edge_pad, lam, flatten, random_seed)
 
     # Create identity array. If the window size is larger than the number of samples
     # only take the number of rows up to the size of number of samples and return.
@@ -102,7 +102,7 @@ def make_arrivals(num_samples: int,
     if num_samples < window_size:
         samples = id_mat[:num_samples]
         if shuffle:
-            rng = np.random.default_rng() if seed is None else np.random.default_rng(seed=seed)
+            rng = np.random.default_rng() if random_seed is None else np.random.default_rng(random_seed=random_seed)
             rng.shuffle(samples) # in-place
         # Pad the samples to get to the appropriate requested dimensions
         samples = np.pad(samples, ((0,0),(edge_pad, edge_pad)), 'constant', constant_values=(0,))
@@ -131,7 +131,7 @@ def make_arrivals(num_samples: int,
         samples = np.vstack((prim_arr, rem_arr))
     
         if shuffle:
-            rng = np.random.default_rng() if seed is None else np.random.default_rng(seed=seed)
+            rng = np.random.default_rng() if random_seed is None else np.random.default_rng(random_seed=random_seed)
             rng.shuffle(samples) # in-place
         # Pad the samples to get to the appropriate requested dimensions
         samples = np.pad(samples, ((0,0),(edge_pad, edge_pad)), 'constant', constant_values=(0,))
@@ -142,7 +142,7 @@ def make_arrivals(num_samples: int,
     # Otherwise, window size divides number of samples
     samples = reduce(lambda acc, x: np.vstack((acc, x)), repeat(id_mat, int(num_samples / id_mat.shape[0])))
     if shuffle:
-       rng = np.random.default_rng() if seed is None else np.random.default_rng(seed=seed)
+       rng = np.random.default_rng() if random_seed is None else np.random.default_rng(random_seed=random_seed)
        rng.shuffle(samples) # in-place shuffling.
 
     # Pad the samples
@@ -222,7 +222,7 @@ def make_data(data_conf_path: pathlib.Path, out_parent_path: pathlib.Path, low_p
         single_pulse=general_conf['single_pulse'],
         flatten=True,
         shuffle=True,
-        seed=general_conf['random_seed']
+        random_seed=general_conf['random_seed']
     )
 
     # Using config dict and photon arrivals, generate a new quasiparticle timestream
@@ -396,7 +396,20 @@ def data_config_loader(data_conf_path: pathlib.Path, constructors: Iterable[type
     with open(data_conf_path, 'rb') as f:
         ret = loader.load(f)
     return ret
-    
+
+def photon_generator(data_conf: dict) -> np.array:
+    """
+    This function makes use of other functions defined earlier to take an input data configuration dict
+    and return a flattened array of photon arrival times.
+    """
+    # Get the arguments from the make_arrivals function
+    # that match the keys in data_conf to be expanded.
+    # This is to reduce verbosity.
+    kwargs = [key for key in getfullargspec(make_arrivals)[0] if key in data_conf['general'].keys()]
+    return make_arrivals(shuffle=True,
+                         lam=data_conf['quasiparticle']['cps'] / data_conf['general']['fs'],
+                         flatten=True,
+                         **{kwarg: data_conf['general'][kwarg] for kwarg in kwargs})
 
     
 
