@@ -23,6 +23,7 @@ from mkidreadoutanalysis.quasiparticletimestream import QuasiparticleTimeStream
 from mkidreadoutanalysis.resonator import Resonator, FrequencyGrid, RFElectronics, ReadoutPhotonResonator, LineNoise
 from mkidreadoutanalysis.optimal_filters.make_filters import Calculator
 import mlcore.dataset.yaml_constructors as yaml_constructors
+from mlcore.dataset.yaml_constructors import TimestreamConf
 
 ### DATASET GENERATION FUNCTIONS ###
 #----------------------------------#
@@ -344,6 +345,7 @@ def load_training_data(filepath: pathlib.Path,
         return tuple([f[label] for label in labels])
 
 #### YAML Constructors ####
+
 def extend_yaml_loader(loader: yaml.SafeLoader, constructor: type, tag: str = None) -> None:
     """
     Takes a YAML loader, YAML constructor tag, and constructor class and adds the constructor to the loader.
@@ -399,8 +401,7 @@ def data_config_loader(data_conf_path: pathlib.Path, constructors: Iterable[type
 
 def photon_generator(data_conf: dict) -> np.array:
     """
-    This function makes use of other functions defined earlier to take an input data configuration dict
-    and return a flattened array of photon arrival times.
+    Takes an input data configuration dict and return a flattened array of photon arrival times.
     """
     # Get the arguments from the make_arrivals function
     # that match the keys in data_conf to be expanded.
@@ -410,6 +411,47 @@ def photon_generator(data_conf: dict) -> np.array:
                          lam=data_conf['quasiparticle']['cps'] / data_conf['general']['fs'],
                          flatten=True,
                          **{kwarg: data_conf['general'][kwarg] for kwarg in kwargs})
+
+def iqp_generator(timestream_confs: TimestreamConf,
+                  readout: ReadoutPhotonResonator,
+                  data_conf: dict) -> tuple[tuple[TimestreamConf, np.ndarray]]:
+    """
+    Generates I, Q, and Phase Response timestreams based on the passed TimestreamConf objects.
+    """
+
+    ret = tuple()
+    # Loop over all TimestreamConf objects and generate streams
+    # as configured. Using loop as opposed to functional approaches since
+    # each timestream creation requires mutating the passed in readout object.
+    for tstm_conf in timestream_confs:
+        if tstm_conf.noise_on:
+            readout.noise_on = True
+        else:
+            readout.noise_on = False
+        if tstm_conf.normalize:
+            # For now, only will provide normalized I and Q streams.
+            if tstm_conf.stream_type == 'i':
+                ret.append((tstm_conf, readout.normalized_iq.real))
+            if tstm_conf.stream_type == 'q':
+                ret.append((tstm_conf, readout.normalized_iq.imag))
+        else:
+            # Non-normalized case
+             if tstm_conf.stream_type == 'i':
+                ret.append((tstm_conf, readout.iq_response.real))
+             if tstm_conf.stream_type == 'q':
+                ret.append((tstm_conf, readout.iq_response.imag))
+    return ret
+            
+
+        
+
+def build_qp_timestream(data_conf: dict, photon_arrivals: np.ndarray) -> QuasiparticleTimeStream:
+    """
+    Builds the QuasiparticleTimestream object that is appropriate based on the generated photon
+    arrivals and parameters in the data configuration file. This is necessary due to the coupling
+    between the QuasiparticleTimestream object and the ReadoutPhotonResonator object.
+    """
+    pass
 
     
 
