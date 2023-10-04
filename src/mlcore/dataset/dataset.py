@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from types import FunctionType
 from hashlib import md5
 import os
+import copy
 from shutil import copy2
 from inspect import getmembers, isclass, getfullargspec
 
@@ -344,7 +345,7 @@ def load_training_data(filepath: pathlib.Path,
     with np.load(filepath) as f:
         return tuple([f[label] for label in labels])
 
-#### YAML Constructors ####
+#### YAML Handling ####
 
 def extend_yaml_loader(loader: yaml.SafeLoader, constructor: type, tag: str = None) -> None:
     """
@@ -412,47 +413,130 @@ def photon_generator(data_conf: dict) -> np.array:
                          flatten=True,
                          **{kwarg: data_conf['general'][kwarg] for kwarg in kwargs})
 
-def iqp_generator(timestream_confs: TimestreamConf,
-                  readout: ReadoutPhotonResonator,
-                  data_conf: dict) -> tuple[tuple[TimestreamConf, np.ndarray]]:
-    """
-    Generates I, Q, and Phase Response timestreams based on the passed TimestreamConf objects.
-    """
 
-    ret = tuple()
-    # Loop over all TimestreamConf objects and generate streams
-    # as configured. Using loop as opposed to functional approaches since
-    # each timestream creation requires mutating the passed in readout object.
-    for tstm_conf in timestream_confs:
-        if tstm_conf.noise_on:
-            readout.noise_on = True
-        else:
-            readout.noise_on = False
-        if tstm_conf.normalize:
-            # For now, only will provide normalized I and Q streams.
-            if tstm_conf.stream_type == 'i':
-                ret.append((tstm_conf, readout.normalized_iq.real))
-            if tstm_conf.stream_type == 'q':
-                ret.append((tstm_conf, readout.normalized_iq.imag))
-        else:
-            # Non-normalized case
-             if tstm_conf.stream_type == 'i':
-                ret.append((tstm_conf, readout.iq_response.real))
-             if tstm_conf.stream_type == 'q':
-                ret.append((tstm_conf, readout.iq_response.imag))
-    return ret
-            
+def iqp_generator(timestream_confs: Iterable[TimestreamConf],
+                  readouts: Iterable[ReadoutPhotonResonator],
+                  phase_transform: str) -> tuple[tuple[TimestreamConf, np.ndarray]]:
+    """
+    Generates I, Q, and Phase Response timestreams based on the passed TimestreamConf objects and
+    the passed ReadoutPhotonResonator objects. Phase transform should be either 'basic' or 'nicks'.
+    """
+    # Auxiliary function to be mapped over the TimestreamConf objects
+    def f(res: ReadoutPhotonResonator, tconf: TimestreamConf):
+        # Create shallow copy of the readout object with noise toggled
+        # appropriately. Shallow copy due to mutation of noise boolean.
+        res = copy.copy(res)
+        res.noise_on = tconf.noise_on
 
+        # Check stream type and normalization condition
+        if tconf.stream_type == 'i':
+            if tconf.normalize:
+                return tconf, res.normalized_iq.real
+            return tconf, res.iq_response.real
+        if tconf.stream_type == 'q':
+            if tconf.normalize:
+                return tconf, res.normalized_iq.imag
+            return tconf, res.iq_response.imag
+        if tconf.stream_type == 'phase':
+            if phase_transform == 'basic':
+                return tconf, res.basic_coordinate_transformation[0]
+            return tconf, res.nick_coordinate_transformation[0]
+        
+    # Auxiliary function for the second map over the readout objects
+    def g(res: ReadoutPhotonResonator):
+        return tuple(map(lambda x: f(res, x), timestream_confs))
+
+    # The map over all the readout objects will result in a 3-level nested tuple,
+    # where we want to return a 2-level nested tuple. This comprehension will unpack
+    # the second level.
+    ret = []
+    _ = [tuple(map(ret.append, x)) for x in map(g, readouts)]
+    return tuple(ret)
         
 
-def build_qp_timestream(data_conf: dict, photon_arrivals: np.ndarray) -> QuasiparticleTimeStream:
+def build_qp_timestreams(data_conf: dict, photon_arrivals: np.ndarray) -> tuple[QuasiparticleTimeStream]:
     """
-    Builds the QuasiparticleTimestream object that is appropriate based on the generated photon
+    Builds the QuasiparticleTimestream objects that are appropriate based on the generated photon
     arrivals and parameters in the data configuration file. This is necessary due to the coupling
-    between the QuasiparticleTimestream object and the ReadoutPhotonResonator object.
+    between the QuasiparticleTimestream object and the ReadoutPhotonResonator object. This function
+    looks specifically at the quasiparticle shift magnitudes in the data configuration dict to determine
+    how many objects to return in the container (one for each magnitude).
     """
-    pass
+    qpt = QuasiparticleTimeStream(fs=data_conf['general']['fs'],
+                                  ts=int(photon_arrivals.size / data_conf['general']['fs']))
+    qpt.photon_arrivals = photon_arrivals
+    
+    # Want to return a tuple of objects with the given magnitudes in the 
+    # data conf dict with the same photon arrivals.
+    def f(mag: float):
+        # Make shallow copy since we will only be manipulating the magnitude
+        # data member and eventually throwing these objects away.
+        temp_qpt = copy.copy(qpt)
 
+        # Generate the qp shift based on the passed in magnitude
+        temp_qpt.gen_quasiparticle_pulse(magnitude=mag)
+        _ = temp_qpt.populate_photons()
+
+        return temp_qpt
+    
+    return tuple(map(f, data_conf['quasiparticle']['qp_shift_magnitudes']))
+
+def build_readouts(data_conf: dict, qpts: Iterable[QuasiparticleTimeStream]) -> tuple[ReadoutPhotonResonator]:
+    """
+    Builds the ReadoutPhotonResonator objects necessary to generate the I, Q, and Phase Response timestreams.
+    The number of readout objects generated is calculated by multiplying the number of passed in QuasiparticleTimeStream
+    objects by the number of white_noise_scale values in the data config dict.
+    """
+    # Define the ancillary objects needed to create the ReadoutPhotonResonator object.
+    # These will be shared among all objects generated (only the quasiparticles will differ.)
+    # Decompose the configuration variable dict into sub-components.
+    res_conf = data_conf['resonator']
+    f_grid_conf = data_conf['freq_grid']
+    noise_conf = data_conf['noise']
+
+    res = Resonator(f0=res_conf['f0'],
+                    qi=res_conf['qi'],
+                    qc=res_conf['qc'],
+                    xa=res_conf['xa'],
+                    a=res_conf['a'],
+                    tls_scale=res_conf['tls_scale']
+                    )
+    f_grid = FrequencyGrid(fc=f_grid_conf['fc'], points=f_grid_conf['points'], span=f_grid_conf['span'])
+    line_noise = LineNoise(freqs=noise_conf['line_noise']['freqs'],
+                            amplitudes=noise_conf['line_noise']['amplitudes'],
+                            phases=noise_conf['line_noise']['phases'],
+                            n_samples=noise_conf['line_noise']['n_samples'],
+                            fs=noise_conf['line_noise']['fs']
+                            )
+    # White noise scale is a variable that will be unique to each readout object.
+    # Will need to map over all the passed in values of white noise to generate
+    # unique RFElectronics objects.
+    def f(noise_scale: float):
+        rf = RFElectronics(gain=tuple(noise_conf['rf_electronics']['gain']),
+                            phase_delay=noise_conf['rf_electronics']['phase_delay'],
+                            white_noise_scale=noise_scale,
+                            line_noise=line_noise,
+                            cable_delay=noise_conf['rf_electronics']['cable_delay']
+                            )
+        return rf
+    rfs = tuple(map(f, noise_conf['rf_electronics']['white_noise_scale']))
+
+    # Lower level aux function to map over all the RFElectronics (E.g. white noise scales)
+    def g(qpt: QuasiparticleTimeStream, rf: RFElectronics):
+        return ReadoutPhotonResonator(res, qpt, f_grid, rf)
+    
+    # Upper level aux function to map over all the QuasiparticleTimeStream
+    # objects (E.g. Quasiparticle shift magnitudes).
+    def h(qpt: QuasiparticleTimeStream):
+        return tuple(map(lambda x: g(qpt, x), rfs))
+
+    # The map over all the quasiparticle objects will result in a nested
+    # tuple, but we want to return a flat tuple. This comprehension unpacks
+    # the second level tuples into a flat list, which gets returned as a tuple.
+    ret = []
+    _ = [tuple(map(ret.append, x)) for x in map(h, qpts)]
+    return tuple(ret)
+    
     
 
 
