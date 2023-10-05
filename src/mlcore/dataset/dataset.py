@@ -5,7 +5,7 @@ for different model architectures and experiments.
 import numpy as np
 import torch
 from itertools import repeat
-from functools import reduce
+from functools import reduce 
 from warnings import warn
 import datetime as dt
 import pathlib
@@ -439,8 +439,8 @@ def iqp_generator(timestream_confs: Iterable[TimestreamConf],
             return tconf, res.iq_response.imag
         if tconf.stream_type == 'phase':
             if phase_transform == 'basic':
-                return tconf, res.basic_coordinate_transformation[0]
-            return tconf, res.nick_coordinate_transformation[0]
+                return tconf, res.basic_coordinate_transformation()[0]
+            return tconf, res.nick_coordinate_transformation()[0]
         
     # Auxiliary function for the second map over the readout objects
     def g(res: ReadoutPhotonResonator):
@@ -463,7 +463,7 @@ def build_qp_timestreams(data_conf: dict, photon_arrivals: np.ndarray) -> tuple[
     how many objects to return in the container (one for each magnitude).
     """
     qpt = QuasiparticleTimeStream(fs=data_conf['general']['fs'],
-                                  ts=int(photon_arrivals.size / data_conf['general']['fs']))
+                                  ts=photon_arrivals.size / data_conf['general']['fs'])
     qpt.photon_arrivals = photon_arrivals
     
     # Want to return a tuple of objects with the given magnitudes in the 
@@ -536,9 +536,44 @@ def build_readouts(data_conf: dict, qpts: Iterable[QuasiparticleTimeStream]) -> 
     ret = []
     _ = [tuple(map(ret.append, x)) for x in map(h, qpts)]
     return tuple(ret)
-    
-    
 
+def data_writer(data_conf: dict,
+                out_path: pathlib.Path,
+                out_name: str,
+                streams: tuple[tuple[TimestreamConf, np.ndarray]]) -> None:
+    """
+    Takes the input data structure from the iqp_generator function and writes the arrays to the given
+    location with the given name. The streams will be saved as a .npz file in the format defined in the
+    save_training_data function defined above.
+    """
+    
+    # First need to reshape the flattened input arrays to be in training sample form;
+    # shape is (num_samples, window_size). 
+    shape = (data_conf['general']['num_samples'], data_conf['general']['window_size'])
+    reshaped = [(stream[0].name, stream[1].view().reshape(shape)) for stream in streams]
+
+    # Now need to create a function that stacks all the individual streams based on stream name in the first dimension.
+    # Can map over the reshaped iterable and stack the name-like streams in a hash table.
+    def f(d: dict, x: tuple[str, np.ndarray]) -> None:
+        # Stack on already existing array
+        if x[0] in d.keys():
+            d[x[0]] = np.vstack((d[x[0]], x[1]))
+        # Add new array to hash table otherwise
+        else:
+            d[x[0]] = x[1]
+        return None
+    
+    stacked = dict()
+    _ = tuple(map(lambda x: f(stacked, x), reshaped))
+
+    # Finally, need to stack all the arrays into one large array along the name axis
+    # to get in the correct format for the save_training_data function.
+    keys = list(stacked.keys())
+    keys.sort()
+    out_arr = np.stack([stacked[key] for key in keys], axis=1)
+
+    # Save the training data
+    save_training_data(out_arr, out_path, out_name, labels=tuple(keys))
 
 ### MODEL LOADING AND SAVING FUNCTIONS ###
 #----------------------------------------#
