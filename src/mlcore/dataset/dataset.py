@@ -1,5 +1,5 @@
 """
-This module contains functions/classes that can be used to manipulate the training data
+This module contains functions/classes that can be used to generate and manipulate the training data
 for different model architectures and experiments.
 """
 import numpy as np
@@ -9,72 +9,45 @@ from functools import reduce
 from warnings import warn
 import datetime as dt
 import pathlib
-from typing import List, Any, Tuple
+from typing import Any, Tuple
 from collections.abc import Iterable
 from types import FunctionType
-from hashlib import md5
-import os
 import copy
-from shutil import copy2
 from inspect import getmembers, isclass, getfullargspec
 
 import ruamel.yaml as yaml
 
 from mkidreadoutanalysis.quasiparticletimestream import QuasiparticleTimeStream
 from mkidreadoutanalysis.resonator import Resonator, FrequencyGrid, RFElectronics, ReadoutPhotonResonator, LineNoise
-from mkidreadoutanalysis.optimal_filters.make_filters import Calculator
 import mlcore.dataset.yaml_constructors as yaml_constructors
 from mlcore.dataset.yaml_constructors import TimestreamConf
 
+#### YAML Handling ####
+
+def extend_yaml_loader(loader: yaml.SafeLoader, constructor: type, tag: str = None) -> None:
+    """
+    Takes a YAML loader, YAML constructor tag, and constructor class and adds the constructor to the loader.
+    Note that the constructor ID must begin with "!"; E.g. "!TimestreamConf". Uses the name of the class
+    to create the tag by default (this dunder needs to be defined in your constructors!)
+    """
+    if tag is not None:
+        loader.constructor.add_constructor(tag, yaml_constructor(constructor))
+    else:
+        loader.constructor.add_constructor(f'!{constructor.__name__}', yaml_constructor(constructor))
+
+def yaml_constructor(cls: type) -> FunctionType:
+    """
+    Builds the YAML constructor function for the passed in class since the
+    yaml "add_constructor" method only expects two arguments (loader and node).
+    Removes the need to define a unique constructor function for each class.
+    E.g. `loader.add_constructor('!my_loader', yaml_constructor(my_loader_class))`
+    """
+    def f(a, b):
+        return cls(**a.construct_mapping(b))
+    return f
+
 ### DATASET GENERATION FUNCTIONS ###
 #----------------------------------#
-
-def gen_iqp(qp_timestream: QuasiparticleTimeStream, conf_var: dict, white_noise_scale: float):
-    """
-    Generate I, Q, and Phase Response time streams using the mkidreadoutanalysis library
-
-    Inputs: 
-        qp_timestream: This object should have the photons generated before passing
-        conf_var: Dict that has all of the configuration values to generate the appropriate
-        objects necessary go generate the resulting time streams.
-    
-    Returns: tuple of three numpy arrays containing the I, Q, and Phase Response timestreams respectively.
-    """
-
-    # Decompose the configuration variable dict into sub-components
-    res_conf = conf_var['resonator']
-    f_grid_conf = conf_var['freq_grid']
-    noise_conf = conf_var['noise']
-    coords_conf = conf_var['coordinates']
-
-    res = Resonator(f0=res_conf['f0'],
-                    qi=res_conf['qi'],
-                    qc=res_conf['qc'],
-                    xa=res_conf['xa'],
-                    a=res_conf['a'],
-                    tls_scale=res_conf['tls_scale']
-                    )
-    f_grid = FrequencyGrid(fc=f_grid_conf['fc'], points=f_grid_conf['points'], span=f_grid_conf['span'])
-    line_noise = LineNoise(freqs=noise_conf['line_noise']['freqs'],
-                            amplitudes=noise_conf['line_noise']['amplitudes'],
-                            phases=noise_conf['line_noise']['phases'],
-                            n_samples=noise_conf['line_noise']['n_samples'],
-                            fs=noise_conf['line_noise']['fs']
-                            )
-    rf = RFElectronics(gain=tuple(noise_conf['rf_electronics']['gain']),
-                        phase_delay=noise_conf['rf_electronics']['phase_delay'],
-                        white_noise_scale=white_noise_scale,
-                        line_noise=line_noise,
-                        cable_delay=noise_conf['rf_electronics']['cable_delay']
-                        )
-    # Create Photon Resonator Readout
-    readout = ReadoutPhotonResonator(res, qp_timestream, f_grid, rf, noise_on=noise_conf['noise_on'])
-
-    # Return I, Q, and Phase Response timestreams
-    if coords_conf['normalize_iq']:
-        return readout.normalized_iq.real, readout.normalized_iq.imag, readout.basic_coordinate_transformation()[0]
-    return readout.iq_response.real, readout.iq_response.imag, readout.basic_coordinate_transformation()[0]
-
 
 def make_arrivals(num_samples: int,
                   window_size: int,
@@ -153,6 +126,7 @@ def make_arrivals(num_samples: int,
         samples = samples.flatten()
     return samples
 
+
 def make_arrivals_multi(num_samples: int, window_size: int, edge_pad: int, lam: float, flatten: bool = False, seed=None):
     """
     Creates photon arrival timestream in training sample format (E.g. In the shape (num_samples, window_size),
@@ -173,119 +147,7 @@ def make_arrivals_multi(num_samples: int, window_size: int, edge_pad: int, lam: 
     return np.pad(arrivals_mat, ((0,0),(edge_pad, edge_pad)), 'constant', constant_values=(0,))
 
 
-def gen_data_dir(file, out_parent_path: pathlib.Path):
-    """
-    This file generates a directory based on the md5 hash of the data_conf.yaml file
-    object that is passed in. This hash will be used to determine whether or not data is unique
-    to reduce data duplication. The directory name will be the md5 hash of the data_conf.yaml
-    file and will contain a copy of the data_conf.yaml file and the npz file with the actual data.
-
-    Returns True if the directory already exists, otherwise returns Path of the newly created
-    directory.
-    """
-
-    # Generate the md5 hash of the passed in data_conf.yaml file.
-    hash = 'a' + str(md5(file.read()).hexdigest())
-
-    # Try to create a new subdirectory under the passed in parent directory
-    # with the hash name. If it exists already, os.mkdir will raise.
-    try:
-        os.mkdir(pathlib.Path(out_parent_path, hash))
-    except FileExistsError as e:
-        print(f'Data already exists with hash: {hash}')
-        return True
-    # Otherwise, directory was created, return path
-    return pathlib.Path(out_parent_path, hash)
-
-def make_data(data_conf_path: pathlib.Path, out_parent_path: pathlib.Path, low_pass_coe: list = None, optimal_filt: Calculator = None) -> None:
-
-    # Check to see if path exists
-    with open(data_conf_path, 'rb') as f:
-        # Generate the new data directory (or return if it already exists)
-        path_ret = gen_data_dir(f, out_parent_path)
-        if not isinstance(path_ret, pathlib.Path):
-            return None
-
-    # Load and parse the yaml file
-    with open(data_conf_path, 'r') as f:
-        # yaml needs the file as text, not bytes
-        conf_var = yaml.safe_load(f)
-
-    # Decompose the configuration variable dict into sub-components
-    general_conf = conf_var['general']
-    qpt_conf = conf_var['quasiparticle']
-
-    # Generate photon arrival timestream
-    photon_arrivals = make_arrivals(
-        general_conf['num_samples'],
-        general_conf['window_size'],
-        general_conf['edge_pad'],
-        lam= qpt_conf['cps'] / general_conf['fs'],
-        single_pulse=general_conf['single_pulse'],
-        flatten=True,
-        shuffle=True,
-        random_seed=general_conf['random_seed']
-    )
-
-    # Using config dict and photon arrivals, generate a new quasiparticle timestream
-    # object. The size of the "data" member must match the length of the flattened photon
-    # arrivals array.
-    qpt = QuasiparticleTimeStream(fs=general_conf['fs'], ts=int(photon_arrivals.size / general_conf['fs']))
-    qpt.photon_arrivals = photon_arrivals
-
-    # quasiparticle shift magnitude and white noise scale are the two major
-    # variables that will be changed in the training data. Loop over all the
-    # passed in values for these variables.
-    ret_arr = []
-    for mag in qpt_conf['qp_shift_magnitudes']:
-        for scale in conf_var['noise']['rf_electronics']['white_noise_scale']:
-            qpt.gen_quasiparticle_pulse(magnitude=mag)
-            _ = qpt.populate_photons()
-
-            # Generate time streams
-            print(f'Generating time streams for mag: {mag}, noise_scale: {scale}...')
-
-            # If there is no optimal filter object passed in,
-            # I/Q streams should be noisy but the phase_response should
-            # be ideal (no noise).
-            if optimal_filt is None:
-                # Get noisy I/Q data
-                i, q, _ = gen_iqp(qpt, conf_var, white_noise_scale=scale)
-
-                # Toggle noise switch to get ideal phase response
-                # timestream, then reactivate
-                conf_var['noise']['noise_on'] = False
-                _, _, phase_response = gen_iqp(qpt, conf_var, white_noise_scale=scale)
-                conf_var['noise']['noise_on'] = True
-
-            # Save the data to the appropriate location in the appropriate format
-            # (See save_training_data docstring for format)
-            ret_arr.append(np.stack((i.reshape(general_conf['num_samples'], general_conf['window_size']),
-                                     q.reshape(general_conf['num_samples'], general_conf['window_size']),
-                                     photon_arrivals.reshape(general_conf['num_samples'], general_conf['window_size']),
-                                     qpt.data.reshape(general_conf['num_samples'], general_conf['window_size']),
-                                     phase_response.reshape(general_conf['num_samples'], general_conf['window_size'])), axis=1))
-
-
-    print(f'Saving data...')
-    save_training_data(np.vstack(ret_arr),
-                       path_ret,
-                       path_ret.stem)
-    
-    print(f'Saved data to {path_ret}.')
-
-    # Copy the data_conf.yaml file to the newly created directory
-    copy_dir = copy2(data_conf_path, path_ret)
-    print(f'Copied yaml config file to {copy_dir}.')
-
-
-
-
-def save_training_data(in_array: Any,
-                       dir: pathlib.Path,
-                       filename: str,
-                       labels: Tuple[str] = ('i', 'q', 'photon_arrivals', 'qp_density', 'phase_response'),
-                       ) -> None:
+def save_training_data(in_array: Any, dir: pathlib.Path, filename: str, labels: Tuple[str]) -> None:
     """
     Saves the training/test data to disk as an npz file after generation.
     This function expects the data to be structured such that the different timestreams
@@ -324,8 +186,7 @@ def save_training_data(in_array: Any,
     np.savez(dir / filename, **kws)
 
 
-def load_training_data(filepath: pathlib.Path,
-                       labels: Tuple[str] = ('i', 'q', 'photon_arrivals', 'qp_density', 'phase_response')) -> Tuple[np.ndarray]:
+def load_training_data(filepath: pathlib.Path, labels: Tuple[str]) -> Tuple[np.ndarray]:
     """
     Loads training/test data from disk based on the format used in
     the save_training_data() function. The reconstructed array will
@@ -345,32 +206,6 @@ def load_training_data(filepath: pathlib.Path,
     with np.load(filepath) as f:
         return tuple([f[label] for label in labels])
 
-#### YAML Handling ####
-
-def extend_yaml_loader(loader: yaml.SafeLoader, constructor: type, tag: str = None) -> None:
-    """
-    Takes a YAML loader, YAML constructor tag, and constructor class and adds the constructor to the loader.
-    Note that the constructor ID must begin with "!"; E.g. "!TimestreamConf". Uses the name of the class
-    to create the tag by default (this dunder needs to be defined in your constructors!)
-    """
-    if tag is not None:
-        loader.constructor.add_constructor(tag, yaml_constructor(constructor))
-    else:
-        loader.constructor.add_constructor(f'!{constructor.__name__}', yaml_constructor(constructor))
-
-def yaml_constructor(cls: type) -> FunctionType:
-    """
-    Builds the YAML constructor function for the passed in class since the
-    yaml "add_constructor" method only expects two arguments (loader and node).
-    Removes the need to define a unique constructor function for each class.
-    E.g. `loader.add_constructor('!my_loader', yaml_constructor(my_loader_class))`
-    """
-    def f(a, b):
-        return cls(**a.construct_mapping(b))
-    return f
-
-
-### NEW DATASET GENERATION FUNCTIONS ###
 
 def data_config_loader(data_conf_path: pathlib.Path, constructors: Iterable[type] = None, tags: Iterable[str] = None) -> dict:
     """
@@ -400,7 +235,8 @@ def data_config_loader(data_conf_path: pathlib.Path, constructors: Iterable[type
         ret = loader.load(f)
     return ret
 
-def photon_generator(data_conf: dict) -> np.array:
+
+def photon_generator(data_conf: dict) -> np.ndarray:
     """
     Takes an input data configuration dict and return a flattened array of photon arrival times.
     """
@@ -481,6 +317,7 @@ def build_qp_timestreams(data_conf: dict, photon_arrivals: np.ndarray) -> tuple[
     
     return tuple(map(f, data_conf['quasiparticle']['qp_shift_magnitudes']))
 
+
 def build_readouts(data_conf: dict, qpts: Iterable[QuasiparticleTimeStream]) -> tuple[ReadoutPhotonResonator]:
     """
     Builds the ReadoutPhotonResonator objects necessary to generate the I, Q, and Phase Response timestreams.
@@ -537,6 +374,7 @@ def build_readouts(data_conf: dict, qpts: Iterable[QuasiparticleTimeStream]) -> 
     _ = [tuple(map(ret.append, x)) for x in map(h, qpts)]
     return tuple(ret)
 
+
 def data_writer(data_conf: dict,
                 out_path: pathlib.Path,
                 out_name: str,
@@ -550,7 +388,7 @@ def data_writer(data_conf: dict,
     # First need to reshape the flattened input arrays to be in training sample form;
     # shape is (num_samples, window_size). 
     shape = (data_conf['general']['num_samples'], data_conf['general']['window_size'])
-    reshaped = [(stream[0].name, stream[1].view().reshape(shape)) for stream in streams]
+    streams = [(stream[0].name, stream[1].reshape(shape)) for stream in streams]
 
     # Now need to create a function that stacks all the individual streams based on stream name in the first dimension.
     # Can map over the reshaped iterable and stack the name-like streams in a hash table.
@@ -564,7 +402,7 @@ def data_writer(data_conf: dict,
         return None
     
     stacked = dict()
-    _ = tuple(map(lambda x: f(stacked, x), reshaped))
+    _ = tuple(map(lambda x: f(stacked, x), streams))
 
     # Finally, need to stack all the arrays into one large array along the name axis
     # to get in the correct format for the save_training_data function.
@@ -574,6 +412,44 @@ def data_writer(data_conf: dict,
 
     # Save the training data
     save_training_data(out_arr, out_path, out_name, labels=tuple(keys))
+
+
+def make_dataset(data_conf_path: pathlib.Path, out_path: pathlib.Path, out_name: str) -> None:
+    """
+    This is a pipeline function that utilizes the functions defined above to create a dataset
+    based on the data configuration yaml file. The dataset format is a .npz file containing different
+    "streams" packaged as numpy arrays of shape (num_training_samples, stream length). The possible streams
+    are I, Q, Phase Response and (optionally, to be defined) the photon arrivals and quasiparticle density shift
+    for each photon. The streams are defined as "TimestreamConf" tags within the data configuration yaml file,
+    see the example for usage.
+    """
+
+    # Load the yaml config file
+    print(f'Loading configuration data...')
+    config_data = data_config_loader(data_conf_path)
+
+    # Generate the photon arrivals that will be used to build quasiparticle shifts
+    print(f'Generating photons...')
+    photons = photon_generator(config_data)
+
+    # Build the QuasiparticleTimeStream object necessary for building the 
+    # noise and readout objects
+    print(f'Generating quasiparticle timestreams...')
+    qpts = build_qp_timestreams(config_data, photons)
+
+    # Create noise and readout objects that will be used to generate the streams
+    print(f'Generating noise and readout objects...')
+    readouts = build_readouts(config_data, qpts)
+
+    # Generate the required streams
+    print(f'Generating streams...')
+    streams = iqp_generator(config_data['timestreams'], readouts, config_data['coordinates']['coord_transform'])
+
+    # Write the streams to disk
+    print(f'Writing streams to disk...')
+    data_writer(config_data, out_path, out_name, streams)
+    print(f'Write complete!')
+
 
 ### MODEL LOADING AND SAVING FUNCTIONS ###
 #----------------------------------------#
